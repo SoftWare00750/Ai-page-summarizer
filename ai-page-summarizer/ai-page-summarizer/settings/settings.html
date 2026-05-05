@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PageMind — Settings</title>
+  <link rel="stylesheet" href="settings.css" />
+</head>
+<body>
+  <div class="page">
+
+    <!-- Header -->
+    <header class="header">
+      <div class="header-brand">
+        <div class="logo">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" fill="url(#grad)"/>
+            <path d="M8 10h8M8 14h5" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
+            <defs>
+              <linearGradient id="grad" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#4fffb0"/>
+                <stop offset="100%" stop-color="#00b4d8"/>
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <div>
+          <h1 class="brand-name">PageMind</h1>
+          <p class="brand-sub">Settings</p>
+        </div>
+      </div>
+    </header>
+
+    <main class="main">
+
+      <!-- Toast -->
+      <div class="toast" id="toast" hidden></div>
+
+      <!-- Provider -->
+      <section class="card">
+        <h2 class="card-title">AI Provider</h2>
+        <p class="card-desc">Choose which AI service to use for summaries.</p>
+
+        <div class="field">
+          <label class="label" for="providerSelect">Provider</label>
+          <select class="select" id="providerSelect">
+            <option value="openai">OpenAI (GPT)</option>
+            <option value="gemini">Google Gemini</option>
+          </select>
+        </div>
+
+        <div class="field" id="modelField">
+          <label class="label" for="modelSelect">Model</label>
+          <select class="select" id="modelSelect">
+            <option value="gpt-4o-mini">GPT-4o mini (fast &amp; cheap)</option>
+            <option value="gpt-4o">GPT-4o (best quality)</option>
+            <option value="gpt-3.5-turbo">GPT-3.5 Turbo (legacy)</option>
+          </select>
+        </div>
+      </section>
+
+      <!-- API Key -->
+      <section class="card">
+        <h2 class="card-title">API Key</h2>
+        <p class="card-desc">
+          Your key is stored locally in <code>chrome.storage.local</code> — it never leaves your device except for direct API calls.
+        </p>
+
+        <div class="field">
+          <label class="label" for="apiKeyInput">
+            <span id="keyLabel">OpenAI API Key</span>
+          </label>
+          <div class="input-wrap">
+            <input
+              class="input"
+              type="password"
+              id="apiKeyInput"
+              placeholder="sk-…"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <button class="toggle-btn" id="toggleKey" aria-label="Toggle key visibility" title="Show/hide key">
+              <svg id="eyeIcon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                <circle cx="12" cy="12" r="3"/>
+              </svg>
+            </button>
+          </div>
+          <p class="hint" id="keyHint">
+            Get your key at <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com/api-keys</a>
+          </p>
+        </div>
+      </section>
+
+      <!-- Cache -->
+      <section class="card">
+        <h2 class="card-title">Cache</h2>
+        <p class="card-desc">Summaries are cached per URL for 30 minutes to avoid repeat API calls.</p>
+        <button class="btn btn--danger" id="clearCacheBtn">Clear All Cached Summaries</button>
+      </section>
+
+      <!-- Actions -->
+      <div class="actions">
+        <button class="btn btn--secondary" id="cancelBtn">Cancel</button>
+        <button class="btn btn--primary" id="saveBtn">Save Settings</button>
+      </div>
+
+    </main>
+  </div>
+
+  <script src="settings.js"></script>
+</body>
+</html>
