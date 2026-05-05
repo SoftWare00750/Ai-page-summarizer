@@ -4,41 +4,53 @@
   // ── DOM refs ───────────────────────────────────────────────────────────────
   const $ = (id) => document.getElementById(id);
   const el = {
-    pageTitle:    $("pageTitle"),
-    pageUrl:      $("pageUrl"),
-    noKeyAlert:   $("noKeyAlert"),
-    goToSettings: $("goToSettings"),
-    errorAlert:   $("errorAlert"),
-    errorMsg:     $("errorMsg"),
-    settingsBtn:  $("settingsBtn"),
-    summarizeBtn: $("summarizeBtn"),
-    clearBtn:     $("clearBtn"),
-    loadingState: $("loadingState"),
-    loadingText:  $("loadingText"),
-    results:      $("results"),
-    emptyState:   $("emptyState"),
-    readingTime:  $("readingTime"),
-    contentType:  $("contentType"),
+    pageTitle:      $("pageTitle"),
+    pageUrl:        $("pageUrl"),
+    noKeyAlert:     $("noKeyAlert"),
+    goToSettings:   $("goToSettings"),
+    errorAlert:     $("errorAlert"),
+    errorMsg:       $("errorMsg"),
+    settingsBtn:    $("settingsBtn"),
+    summarizeBtn:   $("summarizeBtn"),
+    clearBtn:       $("clearBtn"),
+    loadingState:   $("loadingState"),
+    loadingText:    $("loadingText"),
+    results:        $("results"),
+    emptyState:     $("emptyState"),
+    readingTime:    $("readingTime"),
+    contentType:    $("contentType"),
     sentimentBadge: $("sentimentBadge"),
     sentimentText:  $("sentimentText"),
-    cacheBadge:   $("cacheBadge"),
-    summaryList:  $("summaryList"),
-    insightList:  $("insightList"),
-    topicsList:   $("topicsList"),
-    copySummary:  $("copySummary"),
-    highlightBtn: $("highlightBtn"),
-    modeTabs:     document.querySelectorAll(".mode-tab"),
+    cacheBadge:     $("cacheBadge"),
+    summaryList:    $("summaryList"),
+    insightList:    $("insightList"),
+    topicsList:     $("topicsList"),
+    copySummary:    $("copySummary"),
+    highlightBtn:   $("highlightBtn"),
+    modeTabs:       document.querySelectorAll(".mode-tab"),
   };
 
   // ── State ──────────────────────────────────────────────────────────────────
   let state = {
-    mode: "default",
-    activeTab: null,
-    currentUrl: "",
+    mode:             "default",
+    activeTab:        null,
+    currentUrl:       "",
     highlightsActive: false,
-    currentTopics: [],
-    lastSummaryText: "",
+    currentTopics:    [],
+    lastSummaryText:  "",
   };
+
+  // ── Restricted URL prefixes that cannot have content scripts ───────────────
+  const RESTRICTED_PREFIXES = [
+    "chrome://", "chrome-extension://", "about:", "edge://",
+    "brave://", "opera://", "vivaldi://", "moz-extension://",
+    "file://", "data:", "javascript:",
+  ];
+
+  function isRestrictedUrl(url) {
+    if (!url) return true;
+    return RESTRICTED_PREFIXES.some((prefix) => url.startsWith(prefix));
+  }
 
   // ── Init ───────────────────────────────────────────────────────────────────
   async function init() {
@@ -47,6 +59,13 @@
 
     state.currentUrl = state.activeTab.url || "";
     setPageMeta(state.activeTab.title, state.currentUrl);
+
+    // Warn if on a restricted page
+    if (isRestrictedUrl(state.currentUrl)) {
+      showError("PageMind cannot run on browser internal pages. Please navigate to a regular webpage.");
+      el.summarizeBtn.disabled = true;
+      return;
+    }
 
     const settings = await sendToBackground({ type: "GET_SETTINGS" });
     if (!settings?.apiKey) {
@@ -81,19 +100,32 @@
 
     setLoading(true, "Extracting content…");
     el.emptyState.hidden = true;
-    el.results.hidden = true;
-    el.clearBtn.hidden = true;
+    el.results.hidden    = true;
+    el.clearBtn.hidden   = true;
 
     try {
-      // 1. Extract page content via content script
+      // 1. Try to inject content script in case it wasn't loaded (e.g. page was open before install)
+      await ensureContentScript(state.activeTab.id);
+
+      // 2. Extract page content via content script
       const extracted = await sendToTab(state.activeTab.id, { type: "EXTRACT_CONTENT" });
-      if (!extracted?.text || extracted.text.length < 100) {
-        throw new Error("Not enough readable content found on this page.");
+
+      if (!extracted) {
+        throw new Error(
+          "Could not connect to this page. Try refreshing the page (Ctrl+R) and summarizing again."
+        );
+      }
+
+      if (!extracted.text || extracted.text.length < 80) {
+        throw new Error(
+          "Not enough readable text found on this page. " +
+          "Try a different page or wait for the page to fully load."
+        );
       }
 
       setLoadingText("Summarizing with AI…");
 
-      // 2. Send to background for AI call
+      // 3. Send to background for AI call
       const result = await sendToBackground({
         type: "SUMMARIZE",
         payload: {
@@ -108,7 +140,11 @@
         throw new Error(friendlyError(result.error));
       }
 
-      // 3. Render results
+      if (!result || !result.summary) {
+        throw new Error("Received an unexpected response from AI. Please try again.");
+      }
+
+      // 4. Render results
       renderResults(result);
 
     } catch (err) {
@@ -116,6 +152,29 @@
       el.emptyState.hidden = false;
     } finally {
       setLoading(false);
+    }
+  }
+
+  // ── Inject content script if needed ───────────────────────────────────────
+  async function ensureContentScript(tabId) {
+    try {
+      // Probe the content script — if it's there, this returns quickly
+      const probe = await sendToTab(tabId, { type: "EXTRACT_CONTENT" });
+      if (probe !== null) return; // already injected
+    } catch (e) {
+      // fall through to injection
+    }
+
+    // Attempt programmatic injection
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files:  ["content.js"],
+      });
+      // Give it a moment to register the listener
+      await sleep(150);
+    } catch (e) {
+      // Injection may fail on restricted pages — the caller will handle the null response
     }
   }
 
@@ -143,16 +202,16 @@
       el.insightList.appendChild(li);
     });
 
-    state.currentTopics  = data.topics || [];
+    state.currentTopics     = data.topics || [];
     el.topicsList.innerHTML = "";
     state.currentTopics.forEach((topic) => {
-      const chip = document.createElement("span");
+      const chip       = document.createElement("span");
       chip.className   = "topic-chip";
       chip.textContent = sanitize(topic);
       el.topicsList.appendChild(chip);
     });
 
-    state.lastSummaryText = (data.summary || []).join("\n• ");
+    state.lastSummaryText = (data.summary || []).map((b) => `• ${b}`).join("\n");
 
     el.results.hidden    = false;
     el.clearBtn.hidden   = false;
@@ -179,11 +238,11 @@
   async function handleCopy() {
     if (!state.lastSummaryText) return;
     try {
-      await navigator.clipboard.writeText(`• ${state.lastSummaryText}`);
+      await navigator.clipboard.writeText(state.lastSummaryText);
       el.copySummary.classList.add("copied");
       setTimeout(() => el.copySummary.classList.remove("copied"), 1800);
     } catch {
-      // Clipboard API unavailable in some extension contexts
+      // Clipboard API may be unavailable — silently ignore
     }
   }
 
@@ -197,7 +256,7 @@
       el.highlightBtn.classList.remove("active");
     } else {
       await sendToTab(state.activeTab.id, {
-        type: "HIGHLIGHT_TOPICS",
+        type:    "HIGHLIGHT_TOPICS",
         payload: { topics: state.currentTopics },
       });
       state.highlightsActive = true;
@@ -217,8 +276,8 @@
   }
 
   function setLoading(on, text) {
-    el.loadingState.hidden    = !on;
-    el.summarizeBtn.disabled  = on;
+    el.loadingState.hidden   = !on;
+    el.summarizeBtn.disabled = on;
     if (text) setLoadingText(text);
   }
 
@@ -240,6 +299,10 @@
     chrome.runtime.openOptionsPage();
   }
 
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
   // ── Messaging helpers ──────────────────────────────────────────────────────
   function sendToBackground(message) {
     return new Promise((resolve) => {
@@ -257,7 +320,7 @@
     return new Promise((resolve) => {
       chrome.tabs.sendMessage(tabId, message, (response) => {
         if (chrome.runtime.lastError) {
-          resolve(null);
+          resolve(null); // content script not available
         } else {
           resolve(response);
         }
@@ -274,38 +337,35 @@
   }
 
   // ── Security: sanitise text before inserting into DOM ─────────────────────
+  // Increased limit to 800 chars so long summaries aren't truncated
   function sanitize(str) {
-    return String(str).slice(0, 500);
+    return String(str ?? "").slice(0, 800);
   }
 
   // ── Friendly error messages ────────────────────────────────────────────────
   function friendlyError(code) {
+    if (!code) return "Something went wrong. Please try again.";
+
     const map = {
-      // API / auth
-      NO_API_KEY:       "No API key set. Click the settings icon to add one.",
-      INVALID_API_KEY:  "Invalid API key. Please check your key in Settings.",
-      // Rate limiting — now auto-retried; only shown if all retries exhausted
-      RATE_LIMITED:     "API rate limit reached. Please wait a moment and try again.",
-      // Network / timeout
-      NETWORK_ERROR:    "Network error — check your internet connection and try again.",
-      REQUEST_TIMEOUT:  "The request timed out. Please try again.",
-      // Gemini-specific
-      EMPTY_RESPONSE:   "The AI returned an empty response. Try a different page or mode.",
-      SERVER_ERROR:     "The AI service is temporarily unavailable. Please try again shortly.",
+      NO_API_KEY:      "No API key set. Click the settings icon (⚙) to add one.",
+      INVALID_API_KEY: "Invalid API key. Please check your key in Settings.",
+      RATE_LIMITED:    "API rate limit reached after multiple retries. Please wait a minute and try again.",
+      NETWORK_ERROR:   "Network error — check your internet connection and try again.",
+      REQUEST_TIMEOUT: "The request timed out (45s). Check your connection and try again.",
+      EMPTY_RESPONSE:  "The AI returned an empty response. Try a different page or mode.",
+      SERVER_ERROR:    "The AI service is temporarily unavailable. Please try again shortly.",
     };
 
-    // MODEL_NOT_FOUND carries the model name — extract and make it readable
-    if (code?.startsWith("MODEL_NOT_FOUND:")) {
+    if (code.startsWith("MODEL_NOT_FOUND:")) {
       const model = code.split(":")[1]?.trim();
-      return `Model "${model}" not found. Please select a different Gemini model in Settings.`;
+      return `Model "${model}" not found. Please select a different model in Settings.`;
     }
 
-    // BLOCKED: <reason>
-    if (code?.startsWith("BLOCKED:")) {
+    if (code.startsWith("BLOCKED:")) {
       return "This page's content was blocked by the AI's safety filters.";
     }
 
-    return map[code] || code || "Something went wrong. Please try again.";
+    return map[code] || code;
   }
 
   // ── Start ──────────────────────────────────────────────────────────────────
