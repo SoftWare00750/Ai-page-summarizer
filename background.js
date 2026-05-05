@@ -1,9 +1,10 @@
 // background.js — Service Worker
 // Handles all AI API calls. The API key NEVER touches the popup or content script.
 
-const CACHE_TTL_MS  = 30 * 60 * 1000; // 30 minutes
-const FETCH_TIMEOUT = 45_000;          // 45-second per-request timeout (increased for slower networks)
-const MAX_RETRIES   = 3;               // attempts before giving up
+const CACHE_TTL_MS      = 30 * 60 * 1000; // 30 minutes
+const FETCH_TIMEOUT     = 45_000;          // 45-second per-request timeout
+const MAX_RETRIES       = 3;               // attempts for OpenAI / Claude
+const GEMINI_MAX_RETRIES = 2;              // fewer retries for Gemini to avoid quota exhaustion
 
 // ── Message router ────────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -11,7 +12,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleSummarize(message.payload)
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
-    return true; // keep channel open for async
+    return true;
   }
 
   if (message.type === "CLEAR_CACHE") {
@@ -50,7 +51,6 @@ async function handleSummarize({ url, title, content, mode }) {
     const claudeModel = settings.claudeModel || "claude-haiku-4-5-20251001";
     result = await callClaude(settings.apiKey, claudeModel, prompt);
   } else {
-    // Default: OpenAI
     result = await callOpenAI(settings.apiKey, settings.model || "gpt-4o-mini", prompt);
   }
 
@@ -67,9 +67,8 @@ async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
   let lastError;
 
   for (let attempt = 0; attempt < retries; attempt++) {
-    // Exponential back-off before every retry (not before the first attempt)
     if (attempt > 0) {
-      const delay = Math.pow(2, attempt - 1) * 1000; // 1 s, 2 s, 4 s …
+      const delay = Math.pow(2, attempt - 1) * 1000;
       await sleep(delay);
     }
 
@@ -80,33 +79,25 @@ async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
       const res = await fetch(url, { ...options, signal: controller.signal });
       clearTimeout(timer);
 
-      // Retry on 429 (rate-limited) only if we have attempts left
       if (res.status === 429 && attempt < retries - 1) {
-        // Honour Retry-After header if present
         const retryAfterHeader = res.headers.get("Retry-After");
         const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 0;
-        if (retryAfter > 0) {
-          await sleep(retryAfter * 1000);
-        }
+        if (retryAfter > 0) await sleep(retryAfter * 1000);
         lastError = new Error("RATE_LIMITED");
-        continue; // retry
+        continue;
       }
 
-      // Retry on 5xx server errors (except last attempt)
       if (res.status >= 500 && attempt < retries - 1) {
         lastError = new Error("SERVER_ERROR");
         continue;
       }
 
-      return res; // all other statuses returned to caller
+      return res;
     } catch (err) {
       clearTimeout(timer);
-      if (err.name === "AbortError") {
-        lastError = new Error("REQUEST_TIMEOUT");
-      } else {
-        lastError = new Error("NETWORK_ERROR");
-      }
-      // Network failures are retried automatically by the loop
+      lastError = err.name === "AbortError"
+        ? new Error("REQUEST_TIMEOUT")
+        : new Error("NETWORK_ERROR");
     }
   }
 
@@ -126,13 +117,11 @@ async function callOpenAI(apiKey, model, prompt) {
       messages: [
         {
           role: "system",
-          content:
-            "You are an expert content analyst. Always respond with valid JSON only — no markdown fences, no extra text.",
+          content: "You are an expert content analyst. Always respond with valid JSON only — no markdown fences, no extra text.",
         },
         { role: "user", content: prompt },
       ],
       temperature: 0.3,
-      // Use max_completion_tokens for newer models; fall back gracefully
       max_completion_tokens: 1200,
     }),
   });
@@ -143,19 +132,17 @@ async function callOpenAI(apiKey, model, prompt) {
     if (res.status === 401) throw new Error("INVALID_API_KEY");
     if (res.status === 429) throw new Error("RATE_LIMITED");
     if (res.status === 400 && msg.includes("max_completion_tokens")) {
-      // Older model compatibility: retry with max_tokens
       return callOpenAILegacy(apiKey, model, prompt);
     }
     throw new Error(msg);
   }
 
-  const data = await res.json();
+  const data    = await res.json();
   const content = data?.choices?.[0]?.message?.content;
   if (!content) throw new Error("EMPTY_RESPONSE");
   return content;
 }
 
-// Fallback for models that don't support max_completion_tokens
 async function callOpenAILegacy(apiKey, model, prompt) {
   const res = await fetchWithRetry("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -168,8 +155,7 @@ async function callOpenAILegacy(apiKey, model, prompt) {
       messages: [
         {
           role: "system",
-          content:
-            "You are an expert content analyst. Always respond with valid JSON only — no markdown fences, no extra text.",
+          content: "You are an expert content analyst. Always respond with valid JSON only — no markdown fences, no extra text.",
         },
         { role: "user", content: prompt },
       ],
@@ -186,7 +172,7 @@ async function callOpenAILegacy(apiKey, model, prompt) {
     throw new Error(msg);
   }
 
-  const data = await res.json();
+  const data    = await res.json();
   const content = data?.choices?.[0]?.message?.content;
   if (!content) throw new Error("EMPTY_RESPONSE");
   return content;
@@ -196,39 +182,42 @@ async function callOpenAILegacy(apiKey, model, prompt) {
 async function callGemini(apiKey, model, prompt) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
-  const requestBody = {
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: prompt }]
-      }
-    ],
-    generationConfig: {
-      temperature: 0.3,
-      maxOutputTokens: 1200,
-      responseMimeType: "application/json"  // Force JSON response where supported
-    },
-    systemInstruction: {
-      parts: [
-        {
-          text: "You are an expert content analyst. Always respond with valid JSON only — no markdown fences, no extra text.",
-        },
-      ],
-    },
-  };
-
   const res = await fetchWithRetry(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(requestBody),
-  });
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.3,
+        maxOutputTokens: 1200,
+        responseMimeType: "application/json",
+      },
+      systemInstruction: {
+        parts: [{
+          text: "You are an expert content analyst. Always respond with valid JSON only — no markdown fences, no extra text.",
+        }],
+      },
+    }),
+  }, GEMINI_MAX_RETRIES);
 
   if (!res.ok) {
     const errData = await res.json().catch(() => ({}));
     const errMsg  = errData?.error?.message || `HTTP ${res.status}`;
+    const errStatus = errData?.error?.status || "";
+
+    if (res.status === 429) {
+      // Distinguish quota exhaustion from per-minute rate limiting
+      if (
+        errStatus === "RESOURCE_EXHAUSTED" ||
+        errMsg.toLowerCase().includes("quota") ||
+        errMsg.toLowerCase().includes("resource has been exhausted")
+      ) {
+        throw new Error("QUOTA_EXCEEDED");
+      }
+      throw new Error("RATE_LIMITED");
+    }
 
     if (res.status === 400) {
-      // Could be invalid key OR model not found OR responseMimeType not supported
       if (errMsg.toLowerCase().includes("api key") || errMsg.toLowerCase().includes("api_key")) {
         throw new Error("INVALID_API_KEY");
       }
@@ -236,25 +225,26 @@ async function callGemini(apiKey, model, prompt) {
         errMsg.toLowerCase().includes("not found") ||
         errMsg.toLowerCase().includes("does not exist") ||
         errMsg.toLowerCase().includes("invalid model") ||
-        errMsg.toLowerCase().includes("unsupported")
+        errMsg.toLowerCase().includes("unsupported") ||
+        errStatus === "NOT_FOUND"
       ) {
-        // Retry without responseMimeType (older models don't support it)
+        // Model may not support responseMimeType — retry without it
         return callGeminiLegacy(apiKey, model, prompt);
       }
-      // Generic 400 - try legacy call
+      // Generic 400 — try legacy
       return callGeminiLegacy(apiKey, model, prompt);
     }
+
     if (res.status === 401 || res.status === 403) throw new Error("INVALID_API_KEY");
-    if (res.status === 429) throw new Error("RATE_LIMITED");
     if (res.status >= 500) throw new Error("SERVER_ERROR");
     throw new Error(errMsg);
   }
 
   const data = await res.json();
-  return extractGeminiText(data, model);
+  return extractGeminiText(data);
 }
 
-// Fallback Gemini call without responseMimeType (for older/unsupported models)
+// Fallback: no responseMimeType for older/unsupported models
 async function callGeminiLegacy(apiKey, model, prompt) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
@@ -262,44 +252,54 @@ async function callGeminiLegacy(apiKey, model, prompt) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: prompt }]
-        }
-      ],
-      generationConfig: {
-        temperature: 0.3,
-        maxOutputTokens: 1200,
-      },
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.3, maxOutputTokens: 1200 },
       systemInstruction: {
-        parts: [
-          {
-            text: "You are an expert content analyst. Always respond with valid JSON only — no markdown fences, no extra text.",
-          },
-        ],
+        parts: [{
+          text: "You are an expert content analyst. Always respond with valid JSON only — no markdown fences, no extra text.",
+        }],
       },
     }),
-  });
+  }, GEMINI_MAX_RETRIES);
 
   if (!res.ok) {
-    const errData = await res.json().catch(() => ({}));
-    const errMsg  = errData?.error?.message || `HTTP ${res.status}`;
-    if (res.status === 400 && (errMsg.toLowerCase().includes("api key") || errMsg.toLowerCase().includes("api_key")))
-      throw new Error("INVALID_API_KEY");
-    if (res.status === 400 && (errMsg.toLowerCase().includes("not found") || errMsg.toLowerCase().includes("does not exist")))
-      throw new Error(`MODEL_NOT_FOUND: ${model}`);
+    const errData  = await res.json().catch(() => ({}));
+    const errMsg   = errData?.error?.message || `HTTP ${res.status}`;
+    const errStatus = errData?.error?.status || "";
+
+    if (res.status === 429) {
+      if (
+        errStatus === "RESOURCE_EXHAUSTED" ||
+        errMsg.toLowerCase().includes("quota") ||
+        errMsg.toLowerCase().includes("resource has been exhausted")
+      ) {
+        throw new Error("QUOTA_EXCEEDED");
+      }
+      throw new Error("RATE_LIMITED");
+    }
+
+    if (res.status === 400) {
+      if (errMsg.toLowerCase().includes("api key") || errMsg.toLowerCase().includes("api_key"))
+        throw new Error("INVALID_API_KEY");
+      if (
+        errMsg.toLowerCase().includes("not found") ||
+        errMsg.toLowerCase().includes("does not exist") ||
+        errStatus === "NOT_FOUND"
+      )
+        throw new Error(`MODEL_NOT_FOUND: ${model}`);
+      throw new Error(`GEMINI_ERROR: ${errMsg}`);
+    }
+
     if (res.status === 401 || res.status === 403) throw new Error("INVALID_API_KEY");
-    if (res.status === 429) throw new Error("RATE_LIMITED");
     if (res.status >= 500) throw new Error("SERVER_ERROR");
     throw new Error(errMsg);
   }
 
   const data = await res.json();
-  return extractGeminiText(data, model);
+  return extractGeminiText(data);
 }
 
-function extractGeminiText(data, model) {
+function extractGeminiText(data) {
   const candidate = data?.candidates?.[0];
   if (!candidate) {
     const blockReason = data?.promptFeedback?.blockReason;
@@ -307,9 +307,8 @@ function extractGeminiText(data, model) {
     throw new Error("EMPTY_RESPONSE");
   }
 
-  // Handle different finish reasons
   const finishReason = candidate.finishReason;
-  if (finishReason === "SAFETY") throw new Error("BLOCKED: SAFETY");
+  if (finishReason === "SAFETY")    throw new Error("BLOCKED: SAFETY");
   if (finishReason === "RECITATION") throw new Error("BLOCKED: RECITATION");
 
   const text = candidate?.content?.parts?.[0]?.text;
@@ -330,23 +329,20 @@ async function callClaude(apiKey, model, prompt) {
       model,
       max_tokens: 1200,
       system: "You are an expert content analyst. Always respond with valid JSON only — no markdown fences, no extra text.",
-      messages: [
-        { role: "user", content: prompt }
-      ],
+      messages: [{ role: "user", content: prompt }],
     }),
   });
 
   if (!res.ok) {
     const errData = await res.json().catch(() => ({}));
     const msg = errData?.error?.message || `HTTP ${res.status}`;
-    if (res.status === 401) throw new Error("INVALID_API_KEY");
-    if (res.status === 403) throw new Error("INVALID_API_KEY");
+    if (res.status === 401 || res.status === 403) throw new Error("INVALID_API_KEY");
     if (res.status === 429) throw new Error("RATE_LIMITED");
     if (res.status >= 500) throw new Error("SERVER_ERROR");
     throw new Error(msg);
   }
 
-  const data = await res.json();
+  const data    = await res.json();
   const content = data?.content?.[0]?.text;
   if (!content) throw new Error("EMPTY_RESPONSE");
   return content;
@@ -354,7 +350,6 @@ async function callClaude(apiKey, model, prompt) {
 
 // ── Prompt builder ────────────────────────────────────────────────────────────
 function buildPrompt(title, content, mode) {
-  // Truncate to 6000 chars but try to end at a sentence boundary
   let truncated = content.slice(0, 6000);
   if (content.length > 6000) {
     const lastPeriod = truncated.lastIndexOf('. ');
@@ -394,20 +389,17 @@ function parseAIResponse(raw) {
   }
 
   try {
-    // Strip markdown code fences if present
     let cleaned = raw
       .replace(/^```json\s*/i, "")
       .replace(/^```\s*/i, "")
       .replace(/\s*```\s*$/i, "")
       .trim();
 
-    // Try to extract JSON object if surrounded by other text
     const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
     if (jsonMatch) cleaned = jsonMatch[0];
 
     const parsed = JSON.parse(cleaned);
 
-    // Validate and normalise the parsed object
     return {
       summary:     Array.isArray(parsed.summary)     ? parsed.summary     : ["No summary available."],
       keyInsights: Array.isArray(parsed.keyInsights)  ? parsed.keyInsights : [],
@@ -418,7 +410,6 @@ function parseAIResponse(raw) {
                      ? parsed.contentType : "other",
     };
   } catch (e) {
-    // Attempt line-by-line extraction as last resort
     return buildFallbackResponse("Could not parse AI response. Please try again.");
   }
 }

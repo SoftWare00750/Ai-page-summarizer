@@ -40,7 +40,6 @@
     lastSummaryText:  "",
   };
 
-  // ── Restricted URL prefixes that cannot have content scripts ───────────────
   const RESTRICTED_PREFIXES = [
     "chrome://", "chrome-extension://", "about:", "edge://",
     "brave://", "opera://", "vivaldi://", "moz-extension://",
@@ -60,7 +59,6 @@
     state.currentUrl = state.activeTab.url || "";
     setPageMeta(state.activeTab.title, state.currentUrl);
 
-    // Warn if on a restricted page
     if (isRestrictedUrl(state.currentUrl)) {
       showError("PageMind cannot run on browser internal pages. Please navigate to a regular webpage.");
       el.summarizeBtn.disabled = true;
@@ -104,10 +102,8 @@
     el.clearBtn.hidden   = true;
 
     try {
-      // 1. Try to inject content script in case it wasn't loaded (e.g. page was open before install)
       await ensureContentScript(state.activeTab.id);
 
-      // 2. Extract page content via content script
       const extracted = await sendToTab(state.activeTab.id, { type: "EXTRACT_CONTENT" });
 
       if (!extracted) {
@@ -125,7 +121,6 @@
 
       setLoadingText("Summarizing with AI…");
 
-      // 3. Send to background for AI call
       const result = await sendToBackground({
         type: "SUMMARIZE",
         payload: {
@@ -144,7 +139,6 @@
         throw new Error("Received an unexpected response from AI. Please try again.");
       }
 
-      // 4. Render results
       renderResults(result);
 
     } catch (err) {
@@ -158,23 +152,17 @@
   // ── Inject content script if needed ───────────────────────────────────────
   async function ensureContentScript(tabId) {
     try {
-      // Probe the content script — if it's there, this returns quickly
       const probe = await sendToTab(tabId, { type: "EXTRACT_CONTENT" });
-      if (probe !== null) return; // already injected
+      if (probe !== null) return;
     } catch (e) {
       // fall through to injection
     }
 
-    // Attempt programmatic injection
     try {
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        files:  ["content.js"],
-      });
-      // Give it a moment to register the listener
+      await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
       await sleep(150);
     } catch (e) {
-      // Injection may fail on restricted pages — the caller will handle the null response
+      // Injection may fail on restricted pages — caller handles null response
     }
   }
 
@@ -183,7 +171,7 @@
     el.readingTime.textContent = data.readingTime ?? "—";
     el.contentType.textContent = data.contentType ?? "—";
 
-    const sentiment = data.sentiment || "neutral";
+    const sentiment              = data.sentiment || "neutral";
     el.sentimentBadge.className  = `stat sentiment-badge ${sentiment}`;
     el.sentimentText.textContent = sentiment;
     el.cacheBadge.hidden         = !data.fromCache;
@@ -213,9 +201,9 @@
 
     state.lastSummaryText = (data.summary || []).map((b) => `• ${b}`).join("\n");
 
-    el.results.hidden    = false;
-    el.clearBtn.hidden   = false;
-    el.emptyState.hidden = true;
+    el.results.hidden      = false;
+    el.clearBtn.hidden     = false;
+    el.emptyState.hidden   = true;
     state.highlightsActive = false;
     el.highlightBtn.classList.remove("active");
   }
@@ -242,7 +230,7 @@
       el.copySummary.classList.add("copied");
       setTimeout(() => el.copySummary.classList.remove("copied"), 1800);
     } catch {
-      // Clipboard API may be unavailable — silently ignore
+      // Clipboard API may be unavailable
     }
   }
 
@@ -320,7 +308,7 @@
     return new Promise((resolve) => {
       chrome.tabs.sendMessage(tabId, message, (response) => {
         if (chrome.runtime.lastError) {
-          resolve(null); // content script not available
+          resolve(null);
         } else {
           resolve(response);
         }
@@ -337,7 +325,6 @@
   }
 
   // ── Security: sanitise text before inserting into DOM ─────────────────────
-  // Increased limit to 800 chars so long summaries aren't truncated
   function sanitize(str) {
     return String(str ?? "").slice(0, 800);
   }
@@ -349,7 +336,8 @@
     const map = {
       NO_API_KEY:      "No API key set. Click the settings icon (⚙) to add one.",
       INVALID_API_KEY: "Invalid API key. Please check your key in Settings.",
-      RATE_LIMITED:    "API rate limit reached after multiple retries. Please wait a minute and try again.",
+      RATE_LIMITED:    "Rate limit reached. Please wait a moment and try again.",
+      QUOTA_EXCEEDED:  "Gemini API quota exhausted for today. Try again tomorrow, switch to a different model (Gemini 2.0 Flash is recommended), or upgrade to a paid plan.",
       NETWORK_ERROR:   "Network error — check your internet connection and try again.",
       REQUEST_TIMEOUT: "The request timed out (45s). Check your connection and try again.",
       EMPTY_RESPONSE:  "The AI returned an empty response. Try a different page or mode.",
@@ -358,7 +346,12 @@
 
     if (code.startsWith("MODEL_NOT_FOUND:")) {
       const model = code.split(":")[1]?.trim();
-      return `Model "${model}" not found. Please select a different model in Settings.`;
+      return `Model "${model}" not found or not available on your plan. Please select a different model in Settings.`;
+    }
+
+    if (code.startsWith("GEMINI_ERROR:")) {
+      const detail = code.split(":").slice(1).join(":").trim();
+      return `Gemini API error: ${detail}. Please check your API key and model selection in Settings.`;
     }
 
     if (code.startsWith("BLOCKED:")) {
