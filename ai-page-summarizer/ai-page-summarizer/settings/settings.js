@@ -4,17 +4,20 @@
   const $ = (id) => document.getElementById(id);
 
   const el = {
-    providerSelect: $("providerSelect"),
-    modelSelect:    $("modelSelect"),
-    modelField:     $("modelField"),
-    apiKeyInput:    $("apiKeyInput"),
-    keyLabel:       $("keyLabel"),
-    keyHint:        $("keyHint"),
-    toggleKey:      $("toggleKey"),
-    clearCacheBtn:  $("clearCacheBtn"),
-    saveBtn:        $("saveBtn"),
-    cancelBtn:      $("cancelBtn"),
-    toast:          $("toast"),
+    providerSelect:    $("providerSelect"),
+    modelSelect:       $("modelSelect"),
+    modelField:        $("modelField"),
+    geminiModelSelect: $("geminiModelSelect"),
+    geminiModelField:  $("geminiModelField"),
+    checkModelsLink:   $("checkModelsLink"),
+    apiKeyInput:       $("apiKeyInput"),
+    keyLabel:          $("keyLabel"),
+    keyHint:           $("keyHint"),
+    toggleKey:         $("toggleKey"),
+    clearCacheBtn:     $("clearCacheBtn"),
+    saveBtn:           $("saveBtn"),
+    cancelBtn:         $("cancelBtn"),
+    toast:             $("toast"),
   };
 
   const PROVIDER_META = {
@@ -32,10 +35,13 @@
 
   // ── Load saved settings ──────────────────────────────────────────────────
   function load() {
-    chrome.storage.local.get(["apiKey", "provider", "model"], (data) => {
-      el.providerSelect.value = data.provider || "openai";
-      el.modelSelect.value    = data.model    || "gpt-4o-mini";
-      el.apiKeyInput.value    = data.apiKey   || "";
+    chrome.storage.local.get(["apiKey", "provider", "model", "geminiModel"], (data) => {
+      el.providerSelect.value    = data.provider    || "openai";
+      el.modelSelect.value       = data.model       || "gpt-4o-mini";
+      // Default to gemini-2.0-flash for any saved legacy value of gemini-1.5-flash
+      const savedGemini = data.geminiModel || "gemini-2.0-flash";
+      el.geminiModelSelect.value = savedGemini;
+      el.apiKeyInput.value       = data.apiKey      || "";
       updateProviderUI(el.providerSelect.value);
     });
   }
@@ -43,17 +49,33 @@
   // ── Update UI based on selected provider ─────────────────────────────────
   function updateProviderUI(provider) {
     const meta = PROVIDER_META[provider] || PROVIDER_META.openai;
-    el.keyLabel.textContent   = meta.label;
-    el.apiKeyInput.placeholder = meta.placeholder;
-    el.keyHint.innerHTML      = meta.hint; // trusted static strings only
-    el.modelField.hidden      = provider !== "openai";
+    el.keyLabel.textContent        = meta.label;
+    el.apiKeyInput.placeholder     = meta.placeholder;
+    el.keyHint.innerHTML           = meta.hint; // trusted static strings only
+
+    const isOpenAI = provider === "openai";
+    el.modelField.hidden       = !isOpenAI;
+    el.geminiModelField.hidden = isOpenAI;
+
+    // Keep the "check models" link up-to-date with the current key value
+    updateCheckModelsLink();
+  }
+
+  // ── Keep the "check available models" link current ───────────────────────
+  function updateCheckModelsLink() {
+    const key = el.apiKeyInput.value.trim();
+    if (key && el.checkModelsLink) {
+      el.checkModelsLink.href =
+        `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`;
+    }
   }
 
   // ── Save ──────────────────────────────────────────────────────────────────
   function save() {
-    const apiKey   = el.apiKeyInput.value.trim();
-    const provider = el.providerSelect.value;
-    const model    = el.modelSelect.value;
+    const apiKey      = el.apiKeyInput.value.trim();
+    const provider    = el.providerSelect.value;
+    const model       = el.modelSelect.value;
+    const geminiModel = el.geminiModelSelect.value;
 
     if (!apiKey) {
       showToast("Please enter an API key.", "error");
@@ -72,7 +94,7 @@
       return;
     }
 
-    chrome.storage.local.set({ apiKey, provider, model }, () => {
+    chrome.storage.local.set({ apiKey, provider, model, geminiModel }, () => {
       if (chrome.runtime.lastError) {
         showToast("Failed to save settings.", "error");
       } else {
@@ -113,6 +135,9 @@
   el.cancelBtn.addEventListener("click", () => window.close());
   el.clearCacheBtn.addEventListener("click", clearCache);
   el.toggleKey.addEventListener("click", toggleKeyVisibility);
+
+  // Update "check models" link whenever the key changes
+  el.apiKeyInput.addEventListener("input", updateCheckModelsLink);
 
   // Keyboard: Enter to save
   el.apiKeyInput.addEventListener("keydown", (e) => {
