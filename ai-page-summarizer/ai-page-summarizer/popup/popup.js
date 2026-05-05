@@ -64,7 +64,10 @@
 
   el.modeTabs.forEach((tab) => {
     tab.addEventListener("click", () => {
-      el.modeTabs.forEach((t) => { t.classList.remove("active"); t.setAttribute("aria-selected","false"); });
+      el.modeTabs.forEach((t) => {
+        t.classList.remove("active");
+        t.setAttribute("aria-selected", "false");
+      });
       tab.classList.add("active");
       tab.setAttribute("aria-selected", "true");
       state.mode = tab.dataset.mode;
@@ -94,10 +97,10 @@
       const result = await sendToBackground({
         type: "SUMMARIZE",
         payload: {
-          url: extracted.url,
-          title: extracted.title,
+          url:     extracted.url,
+          title:   extracted.title,
           content: extracted.text,
-          mode: state.mode,
+          mode:    state.mode,
         },
       });
 
@@ -118,16 +121,14 @@
 
   // ── Render ─────────────────────────────────────────────────────────────────
   function renderResults(data) {
-    // Stats
-    el.readingTime.textContent  = data.readingTime ?? "—";
-    el.contentType.textContent  = data.contentType ?? "—";
+    el.readingTime.textContent = data.readingTime ?? "—";
+    el.contentType.textContent = data.contentType ?? "—";
 
     const sentiment = data.sentiment || "neutral";
-    el.sentimentBadge.className = `stat sentiment-badge ${sentiment}`;
+    el.sentimentBadge.className  = `stat sentiment-badge ${sentiment}`;
     el.sentimentText.textContent = sentiment;
-    el.cacheBadge.hidden = !data.fromCache;
+    el.cacheBadge.hidden         = !data.fromCache;
 
-    // Summary bullets
     el.summaryList.innerHTML = "";
     (data.summary || []).forEach((point) => {
       const li = document.createElement("li");
@@ -135,7 +136,6 @@
       el.summaryList.appendChild(li);
     });
 
-    // Key insights
     el.insightList.innerHTML = "";
     (data.keyInsights || []).forEach((insight) => {
       const li = document.createElement("li");
@@ -143,22 +143,19 @@
       el.insightList.appendChild(li);
     });
 
-    // Topics chips
-    state.currentTopics = data.topics || [];
+    state.currentTopics  = data.topics || [];
     el.topicsList.innerHTML = "";
     state.currentTopics.forEach((topic) => {
       const chip = document.createElement("span");
-      chip.className = "topic-chip";
+      chip.className   = "topic-chip";
       chip.textContent = sanitize(topic);
       el.topicsList.appendChild(chip);
     });
 
-    // Copy text
     state.lastSummaryText = (data.summary || []).join("\n• ");
 
-    // Show / hide
-    el.results.hidden = false;
-    el.clearBtn.hidden = false;
+    el.results.hidden    = false;
+    el.clearBtn.hidden   = false;
     el.emptyState.hidden = true;
     state.highlightsActive = false;
     el.highlightBtn.classList.remove("active");
@@ -166,17 +163,14 @@
 
   // ── Clear ──────────────────────────────────────────────────────────────────
   async function handleClear() {
-    // Clear highlights if active
     if (state.highlightsActive) {
       await sendToTab(state.activeTab.id, { type: "CLEAR_HIGHLIGHTS" });
       state.highlightsActive = false;
     }
-
-    // Clear from cache
     await sendToBackground({ type: "CLEAR_CACHE", payload: { url: state.currentUrl } });
 
-    el.results.hidden = true;
-    el.clearBtn.hidden = true;
+    el.results.hidden    = true;
+    el.clearBtn.hidden   = true;
     el.emptyState.hidden = false;
     clearError();
   }
@@ -189,7 +183,7 @@
       el.copySummary.classList.add("copied");
       setTimeout(() => el.copySummary.classList.remove("copied"), 1800);
     } catch {
-      // Clipboard API may not be available in all extension contexts
+      // Clipboard API unavailable in some extension contexts
     }
   }
 
@@ -223,8 +217,8 @@
   }
 
   function setLoading(on, text) {
-    el.loadingState.hidden = !on;
-    el.summarizeBtn.disabled = on;
+    el.loadingState.hidden    = !on;
+    el.summarizeBtn.disabled  = on;
     if (text) setLoadingText(text);
   }
 
@@ -233,12 +227,12 @@
   }
 
   function showError(msg) {
-    el.errorAlert.hidden = false;
+    el.errorAlert.hidden    = false;
     el.errorMsg.textContent = msg;
   }
 
   function clearError() {
-    el.errorAlert.hidden = true;
+    el.errorAlert.hidden    = true;
     el.errorMsg.textContent = "";
   }
 
@@ -281,17 +275,36 @@
 
   // ── Security: sanitise text before inserting into DOM ─────────────────────
   function sanitize(str) {
-    // Only use .textContent assignment (already XSS-safe) — this is a belt-and-suspenders guard
     return String(str).slice(0, 500);
   }
 
-  // ── Error messages ─────────────────────────────────────────────────────────
+  // ── Friendly error messages ────────────────────────────────────────────────
   function friendlyError(code) {
     const map = {
-      NO_API_KEY:      "No API key set. Click the settings icon to add one.",
-      INVALID_API_KEY: "Invalid API key. Please check your settings.",
-      RATE_LIMITED:    "AI API rate limit hit. Wait a moment and try again.",
+      // API / auth
+      NO_API_KEY:       "No API key set. Click the settings icon to add one.",
+      INVALID_API_KEY:  "Invalid API key. Please check your key in Settings.",
+      // Rate limiting — now auto-retried; only shown if all retries exhausted
+      RATE_LIMITED:     "API rate limit reached. Please wait a moment and try again.",
+      // Network / timeout
+      NETWORK_ERROR:    "Network error — check your internet connection and try again.",
+      REQUEST_TIMEOUT:  "The request timed out. Please try again.",
+      // Gemini-specific
+      EMPTY_RESPONSE:   "The AI returned an empty response. Try a different page or mode.",
+      SERVER_ERROR:     "The AI service is temporarily unavailable. Please try again shortly.",
     };
+
+    // MODEL_NOT_FOUND carries the model name — extract and make it readable
+    if (code?.startsWith("MODEL_NOT_FOUND:")) {
+      const model = code.split(":")[1]?.trim();
+      return `Model "${model}" not found. Please select a different Gemini model in Settings.`;
+    }
+
+    // BLOCKED: <reason>
+    if (code?.startsWith("BLOCKED:")) {
+      return "This page's content was blocked by the AI's safety filters.";
+    }
+
     return map[code] || code || "Something went wrong. Please try again.";
   }
 
