@@ -1,7 +1,9 @@
 // background.js — Service Worker
 // Handles all AI API calls. The API key NEVER touches the popup or content script.
 
-const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const CACHE_TTL_MS  = 30 * 60 * 1000; // 30 minutes
+const FETCH_TIMEOUT = 30_000;          // 30-second per-request timeout
+const MAX_RETRIES   = 3;               // attempts before giving up
 
 // ── Message router ────────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -9,7 +11,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleSummarize(message.payload)
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
-    return true; // keep channel open for async response
+    return true;
   }
 
   if (message.type === "CLEAR_CACHE") {
@@ -29,46 +31,86 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // ── Main summarize handler ────────────────────────────────────────────────────
 async function handleSummarize({ url, title, content, mode }) {
-  // 1. Load settings (API key, provider)
   const settings = await getSettings();
-  if (!settings.apiKey) {
-    throw new Error("NO_API_KEY");
-  }
+  if (!settings.apiKey) throw new Error("NO_API_KEY");
 
-  // 2. Check cache
   const cacheKey = `cache_${hashUrl(url)}_${mode || "default"}`;
-  const cached = await getCached(cacheKey);
-  if (cached) {
-    return { ...cached, fromCache: true };
-  }
+  const cached   = await getCached(cacheKey);
+  if (cached) return { ...cached, fromCache: true };
 
-  // 3. Build prompt
   const prompt = buildPrompt(title, content, mode);
 
-  // 4. Call AI provider
   let result;
   if (settings.provider === "gemini") {
-    // Use stored geminiModel, falling back to gemini-2.0-flash
     const geminiModel = settings.geminiModel || "gemini-2.0-flash";
     result = await callGemini(settings.apiKey, geminiModel, prompt);
   } else {
     result = await callOpenAI(settings.apiKey, settings.model || "gpt-4o-mini", prompt);
   }
 
-  // 5. Parse structured response
-  const parsed = parseAIResponse(result);
+  const parsed      = parseAIResponse(result);
   const readingTime = estimateReadingTime(content);
-  const response = { ...parsed, readingTime, fromCache: false };
+  const response    = { ...parsed, readingTime, fromCache: false };
 
-  // 6. Cache it
   await setCached(cacheKey, response);
-
   return response;
+}
+
+// ── Fetch with timeout + exponential-backoff retry ────────────────────────────
+/**
+ * Wraps fetch() with:
+ *   • A per-attempt AbortController timeout (FETCH_TIMEOUT ms)
+ *   • Automatic retries for network errors and 429 responses
+ *   • Exponential back-off: 1 s, 2 s, 4 s … between attempts
+ *
+ * @param {string}  url
+ * @param {object}  options  — standard fetch options (method, headers, body)
+ * @param {number}  [retries=MAX_RETRIES]
+ * @returns {Promise<Response>}  — always a resolved Response (caller checks .ok)
+ */
+async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
+  let lastError;
+
+  for (let attempt = 0; attempt < retries; attempt++) {
+    // Back-off before every retry (not before the first attempt)
+    if (attempt > 0) {
+      const delay = Math.pow(2, attempt - 1) * 1000; // 1 s, 2 s, 4 s …
+      await sleep(delay);
+    }
+
+    const controller = new AbortController();
+    const timer      = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+
+    try {
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timer);
+
+      // Retry on 429 (rate-limited) only if we have attempts left
+      if (res.status === 429 && attempt < retries - 1) {
+        // Honour Retry-After header if present
+        const retryAfter = parseInt(res.headers.get("Retry-After") || "0", 10);
+        if (retryAfter > 0) await sleep(retryAfter * 1000);
+        continue; // retry
+      }
+
+      return res; // all other statuses (including errors) returned to caller
+    } catch (err) {
+      clearTimeout(timer);
+      if (err.name === "AbortError") {
+        lastError = new Error("REQUEST_TIMEOUT");
+      } else {
+        // Network-level failure (DNS, TCP, etc.) — retry
+        lastError = new Error("NETWORK_ERROR");
+      }
+    }
+  }
+
+  throw lastError; // exhausted all retries
 }
 
 // ── OpenAI API call ───────────────────────────────────────────────────────────
 async function callOpenAI(apiKey, model, prompt) {
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+  const res = await fetchWithRetry("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -103,10 +145,9 @@ async function callOpenAI(apiKey, model, prompt) {
 
 // ── Gemini API call ───────────────────────────────────────────────────────────
 async function callGemini(apiKey, model, prompt) {
-  // Use v1beta endpoint with the caller-supplied model name
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -123,27 +164,41 @@ async function callGemini(apiKey, model, prompt) {
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
+    const err    = await res.json().catch(() => ({}));
     const errMsg = err?.error?.message || `HTTP ${res.status}`;
     if (res.status === 400 && errMsg.includes("API_KEY"))
       throw new Error("INVALID_API_KEY");
     if (res.status === 400 && errMsg.toLowerCase().includes("not found"))
       throw new Error(`MODEL_NOT_FOUND: ${model}`);
-    if (res.status === 429) throw new Error("RATE_LIMITED");
+    if (res.status === 401 || res.status === 403)
+      throw new Error("INVALID_API_KEY");
+    if (res.status === 429)
+      throw new Error("RATE_LIMITED");
+    if (res.status >= 500)
+      throw new Error("SERVER_ERROR");
     throw new Error(errMsg);
   }
 
   const data = await res.json();
-  return data.candidates[0].content.parts[0].text;
+
+  // Guard against empty / blocked responses
+  const candidate = data?.candidates?.[0];
+  if (!candidate) {
+    const blockReason = data?.promptFeedback?.blockReason;
+    if (blockReason) throw new Error(`BLOCKED: ${blockReason}`);
+    throw new Error("EMPTY_RESPONSE");
+  }
+
+  return candidate.content.parts[0].text;
 }
 
 // ── Prompt builder ────────────────────────────────────────────────────────────
 function buildPrompt(title, content, mode) {
-  const truncated = content.slice(0, 6000); // stay within token limits
+  const truncated = content.slice(0, 6000);
 
   const instructions = {
-    default: `Summarize this article in 4–6 bullet points, identify 3 key insights, and list up to 5 important topics.`,
-    brief: `Summarize this article in exactly 3 bullet points, identify 1 key insight, and list up to 3 important topics.`,
+    default:  `Summarize this article in 4–6 bullet points, identify 3 key insights, and list up to 5 important topics.`,
+    brief:    `Summarize this article in exactly 3 bullet points, identify 1 key insight, and list up to 3 important topics.`,
     detailed: `Provide a thorough summary in 7–10 bullet points, identify 5 key insights, and list up to 8 important topics.`,
   };
 
@@ -167,11 +222,9 @@ Respond ONLY with this exact JSON structure:
 // ── Response parser ───────────────────────────────────────────────────────────
 function parseAIResponse(raw) {
   try {
-    // Strip any accidental markdown fences
     const cleaned = raw.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
     return JSON.parse(cleaned);
   } catch {
-    // Fallback: extract what we can
     return {
       summary: ["The AI returned an unexpected format. Please try again."],
       keyInsights: [],
@@ -185,12 +238,10 @@ function parseAIResponse(raw) {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function estimateReadingTime(text) {
   const words = text.trim().split(/\s+/).length;
-  const minutes = Math.ceil(words / 238); // average reading speed
-  return minutes;
+  return Math.ceil(words / 238);
 }
 
 function hashUrl(url) {
-  // Simple deterministic hash for cache keys
   let hash = 0;
   for (let i = 0; i < url.length; i++) {
     hash = (hash << 5) - hash + url.charCodeAt(i);
@@ -198,6 +249,8 @@ function hashUrl(url) {
   }
   return Math.abs(hash).toString(36);
 }
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ── Storage helpers ───────────────────────────────────────────────────────────
 async function getSettings() {
@@ -227,17 +280,15 @@ async function clearCache(url) {
   return new Promise((resolve) => {
     if (url) {
       const key = `cache_${hashUrl(url)}`;
-      // Clear all modes for this URL
       chrome.storage.local.get(null, (all) => {
         const keysToRemove = Object.keys(all).filter((k) => k.startsWith(key));
         chrome.storage.local.remove(keysToRemove, resolve);
       });
     } else {
-      // Clear all cache entries
       chrome.storage.local.get(null, (all) => {
         const keysToRemove = Object.keys(all).filter((k) => k.startsWith("cache_"));
         chrome.storage.local.remove(keysToRemove, resolve);
       });
     }
   });
-        }
+}
