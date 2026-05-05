@@ -48,7 +48,9 @@ async function handleSummarize({ url, title, content, mode }) {
   // 4. Call AI provider
   let result;
   if (settings.provider === "gemini") {
-    result = await callGemini(settings.apiKey, prompt);
+    // Use stored geminiModel, falling back to gemini-2.0-flash
+    const geminiModel = settings.geminiModel || "gemini-2.0-flash";
+    result = await callGemini(settings.apiKey, geminiModel, prompt);
   } else {
     result = await callOpenAI(settings.apiKey, settings.model || "gpt-4o-mini", prompt);
   }
@@ -100,8 +102,8 @@ async function callOpenAI(apiKey, model, prompt) {
 }
 
 // ── Gemini API call ───────────────────────────────────────────────────────────
-async function callGemini(apiKey, prompt) {
-  const model = "gemini-1.5-flash";
+async function callGemini(apiKey, model, prompt) {
+  // Use v1beta endpoint with the caller-supplied model name
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
   const res = await fetch(url, {
@@ -122,10 +124,13 @@ async function callGemini(apiKey, prompt) {
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    if (res.status === 400 && err?.error?.message?.includes("API_KEY"))
+    const errMsg = err?.error?.message || `HTTP ${res.status}`;
+    if (res.status === 400 && errMsg.includes("API_KEY"))
       throw new Error("INVALID_API_KEY");
+    if (res.status === 400 && errMsg.toLowerCase().includes("not found"))
+      throw new Error(`MODEL_NOT_FOUND: ${model}`);
     if (res.status === 429) throw new Error("RATE_LIMITED");
-    throw new Error(err?.error?.message || `HTTP ${res.status}`);
+    throw new Error(errMsg);
   }
 
   const data = await res.json();
@@ -197,7 +202,7 @@ function hashUrl(url) {
 // ── Storage helpers ───────────────────────────────────────────────────────────
 async function getSettings() {
   return new Promise((resolve) => {
-    chrome.storage.local.get(["apiKey", "provider", "model"], resolve);
+    chrome.storage.local.get(["apiKey", "provider", "model", "geminiModel"], resolve);
   });
 }
 
@@ -235,4 +240,4 @@ async function clearCache(url) {
       });
     }
   });
-}
+        }
