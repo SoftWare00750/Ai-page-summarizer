@@ -3,43 +3,54 @@
 // Runs in the page context but communicates safely via chrome.runtime messaging.
 
 (function () {
+  // Guard: avoid double-injection
+  if (window.__pageMindInjected) return;
+  window.__pageMindInjected = true;
+
   // ── Message listener ──────────────────────────────────────────────────────
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (message.type === "EXTRACT_CONTENT") {
-      const extracted = extractContent();
-      sendResponse(extracted);
+    try {
+      if (message.type === "EXTRACT_CONTENT") {
+        const extracted = extractContent();
+        sendResponse(extracted);
+        return true;
+      }
+
+      if (message.type === "HIGHLIGHT_TOPICS") {
+        highlightTopics(message.payload?.topics || []);
+        sendResponse({ ok: true });
+        return true;
+      }
+
+      if (message.type === "CLEAR_HIGHLIGHTS") {
+        clearHighlights();
+        sendResponse({ ok: true });
+        return true;
+      }
+    } catch (err) {
+      sendResponse({ error: err.message });
     }
 
-    if (message.type === "HIGHLIGHT_TOPICS") {
-      highlightTopics(message.payload?.topics || []);
-      sendResponse({ ok: true });
-    }
-
-    if (message.type === "CLEAR_HIGHLIGHTS") {
-      clearHighlights();
-      sendResponse({ ok: true });
-    }
-
-    return true;
+    return true; // keep channel open for all paths
   });
 
   // ── Content extractor ─────────────────────────────────────────────────────
   function extractContent() {
-    const title = getTitle();
-    const text = getMainContent();
-    const wordCount = text.trim().split(/\s+/).length;
-    const url = window.location.href;
+    const title     = getTitle();
+    const text      = getMainContent();
+    const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
+    const url       = window.location.href;
 
     return { title, text, wordCount, url };
   }
 
   function getTitle() {
-    // Prefer OG title, then document title, then h1
+    // Prefer OG title > h1 > document.title
     const og = document.querySelector('meta[property="og:title"]');
-    if (og?.content) return og.content.trim();
+    if (og?.content?.trim()) return og.content.trim();
 
     const h1 = document.querySelector("h1");
-    if (h1?.innerText) return h1.innerText.trim();
+    if (h1?.innerText?.trim()) return h1.innerText.trim();
 
     return document.title.trim();
   }
@@ -50,8 +61,13 @@
       document.querySelector("article"),
       document.querySelector('[role="main"]'),
       document.querySelector("main"),
-      document.querySelector(".post-content, .article-body, .entry-content, .content-body"),
-      document.querySelector("#content, #main-content, #article-body"),
+      document.querySelector(".post-content"),
+      document.querySelector(".article-body"),
+      document.querySelector(".entry-content"),
+      document.querySelector(".content-body"),
+      document.querySelector("#content"),
+      document.querySelector("#main-content"),
+      document.querySelector("#article-body"),
       document.body,
     ].filter(Boolean);
 
@@ -64,6 +80,8 @@
   }
 
   function extractText(root) {
+    if (!root) return "";
+
     // Clone to avoid mutating the DOM
     const clone = root.cloneNode(true);
 
@@ -71,25 +89,30 @@
     const noisy = [
       "script", "style", "noscript", "iframe", "nav", "header",
       "footer", "aside", "form", "button", "input", "select",
-      "textarea", "figure > figcaption", ".ad", ".ads", ".advertisement",
+      "textarea", "figcaption", ".ad", ".ads", ".advertisement",
       ".sidebar", ".widget", ".comment", ".comments", ".related",
       ".share", ".social", ".navigation", ".menu", ".cookie",
-      "[aria-hidden='true']", ".visually-hidden",
+      "[aria-hidden='true']", ".visually-hidden", "[hidden]",
+      ".pagemind-mark",  // don't re-extract our own highlights
     ];
 
     noisy.forEach((sel) => {
-      clone.querySelectorAll(sel).forEach((el) => el.remove());
+      try {
+        clone.querySelectorAll(sel).forEach((el) => el.remove());
+      } catch (e) {
+        // Invalid selector — skip it
+      }
     });
 
-    // Get text with spacing preserved
-    const walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT);
+    // Prefer innerText for rendered text (respects visibility)
+    // Fall back to TreeWalker for cloned nodes
     const parts = [];
+    const walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT);
     let node;
 
     while ((node = walker.nextNode())) {
       const text = node.textContent.trim();
       if (text.length > 20) {
-        // Filter short fragments (nav items, labels)
         parts.push(text);
       }
     }
@@ -98,29 +121,34 @@
   }
 
   // ── Highlighter ───────────────────────────────────────────────────────────
-  const HIGHLIGHT_CLASS = "pagemind-highlight";
   const HIGHLIGHT_MARK_CLASS = "pagemind-mark";
+  const STYLE_ID = "pagemind-styles";
 
   function highlightTopics(topics) {
     clearHighlights();
-    if (!topics.length) return;
+    if (!topics || !topics.length) return;
 
     injectHighlightStyles();
 
-    const pattern = topics
-      .filter((t) => t.length > 2)
-      .map((t) => escapeRegex(t))
-      .join("|");
+    const validTopics = topics.filter((t) => typeof t === "string" && t.length > 2);
+    if (!validTopics.length) return;
 
+    const pattern = validTopics.map((t) => escapeRegex(t)).join("|");
     if (!pattern) return;
 
     const regex = new RegExp(`(${pattern})`, "gi");
-    walkAndHighlight(document.body, regex);
+
+    // Limit highlighting to main content area to avoid nav/footer noise
+    const target = document.querySelector("article, [role='main'], main, #content, body") || document.body;
+    walkAndHighlight(target, regex);
   }
 
   function walkAndHighlight(node, regex) {
+    if (!node) return;
+
     if (node.nodeType === Node.TEXT_NODE) {
       const text = node.textContent;
+      regex.lastIndex = 0;
       if (!regex.test(text)) return;
       regex.lastIndex = 0;
 
@@ -134,7 +162,7 @@
         }
         const mark = document.createElement("mark");
         mark.className = HIGHLIGHT_MARK_CLASS;
-        mark.textContent = match[0];
+        mark.textContent = match[0]; // safe: textContent, not innerHTML
         frag.appendChild(mark);
         last = regex.lastIndex;
       }
@@ -147,17 +175,21 @@
       return;
     }
 
-    // Skip scripts, styles, and our own marks
-    if (
-      node.nodeType !== Node.ELEMENT_NODE ||
-      node.tagName === "SCRIPT" ||
-      node.tagName === "STYLE" ||
-      node.tagName === "MARK" ||
-      node.classList?.contains(HIGHLIGHT_MARK_CLASS)
-    )
-      return;
+    // Skip non-element nodes and excluded tags
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
 
-    // Process children (static array to avoid live list issues)
+    const tag = node.tagName?.toUpperCase();
+    if (
+      tag === "SCRIPT" ||
+      tag === "STYLE" ||
+      tag === "MARK" ||
+      tag === "NOSCRIPT" ||
+      tag === "TEXTAREA" ||
+      tag === "INPUT" ||
+      node.classList?.contains(HIGHLIGHT_MARK_CLASS)
+    ) return;
+
+    // Process children (static snapshot to avoid live list mutation issues)
     Array.from(node.childNodes).forEach((child) => walkAndHighlight(child, regex));
   }
 
@@ -165,19 +197,18 @@
     document.querySelectorAll(`.${HIGHLIGHT_MARK_CLASS}`).forEach((mark) => {
       const parent = mark.parentNode;
       if (!parent) return;
-      parent.replaceChild(document.createTextNode(mark.textContent), mark);
+      parent.replaceChild(document.createTextNode(mark.textContent || ""), mark);
       parent.normalize();
     });
 
-    const style = document.getElementById("pagemind-styles");
+    const style = document.getElementById(STYLE_ID);
     if (style) style.remove();
   }
 
   function injectHighlightStyles() {
-    if (document.getElementById("pagemind-styles")) return;
+    if (document.getElementById(STYLE_ID)) return;
     const style = document.createElement("style");
-    style.id = "pagemind-styles";
-    // Sanitized inline — no user content in CSS
+    style.id = STYLE_ID;
     style.textContent = `
       .${HIGHLIGHT_MARK_CLASS} {
         background: rgba(99, 211, 168, 0.35) !important;
@@ -193,4 +224,5 @@
   function escapeRegex(str) {
     return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
+
 })();
