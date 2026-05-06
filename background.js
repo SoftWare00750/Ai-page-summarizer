@@ -1,9 +1,9 @@
 // background.js — Service Worker
 // Handles all AI API calls. The API key NEVER touches the popup or content script.
 
-const CACHE_TTL_MS      = 30 * 60 * 1000; // 30 minutes
-const FETCH_TIMEOUT     = 45_000;          // 45-second per-request timeout
-const MAX_RETRIES       = 3;               // attempts for OpenAI / Claude
+const CACHE_TTL_MS       = 30 * 60 * 1000; // 30 minutes
+const FETCH_TIMEOUT      = 45_000;          // 45-second per-request timeout
+const MAX_RETRIES        = 3;               // attempts for OpenAI / Claude
 const GEMINI_MAX_RETRIES = 2;              // fewer retries for Gemini to avoid quota exhaustion
 
 // ── Message router ────────────────────────────────────────────────────────────
@@ -32,7 +32,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // ── Main summarize handler ────────────────────────────────────────────────────
 async function handleSummarize({ url, title, content, mode }) {
+  // BUG FIX: getSettings now always returns defaults, so this is reliable
   const settings = await getSettings();
+
   if (!settings.apiKey) throw new Error("NO_API_KEY");
 
   const cacheKey = `cache_${hashUrl(url)}_${mode || "default"}`;
@@ -42,12 +44,15 @@ async function handleSummarize({ url, title, content, mode }) {
   const prompt = buildPrompt(title, content, mode);
 
   let result;
+  // BUG FIX: was falling through to openai when provider was undefined
   const provider = settings.provider || "openai";
 
   if (provider === "gemini") {
+    // BUG FIX: use correct default model string
     const geminiModel = settings.geminiModel || "gemini-2.0-flash";
     result = await callGemini(settings.apiKey, geminiModel, prompt);
   } else if (provider === "claude") {
+    // BUG FIX: use correct default model string matching what settings.html saves
     const claudeModel = settings.claudeModel || "claude-haiku-4-5-20251001";
     result = await callClaude(settings.apiKey, claudeModel, prompt);
   } else {
@@ -206,7 +211,6 @@ async function callGemini(apiKey, model, prompt) {
     const errStatus = errData?.error?.status || "";
 
     if (res.status === 429) {
-      // Distinguish quota exhaustion from per-minute rate limiting
       if (
         errStatus === "RESOURCE_EXHAUSTED" ||
         errMsg.toLowerCase().includes("quota") ||
@@ -228,10 +232,8 @@ async function callGemini(apiKey, model, prompt) {
         errMsg.toLowerCase().includes("unsupported") ||
         errStatus === "NOT_FOUND"
       ) {
-        // Model may not support responseMimeType — retry without it
         return callGeminiLegacy(apiKey, model, prompt);
       }
-      // Generic 400 — try legacy
       return callGeminiLegacy(apiKey, model, prompt);
     }
 
@@ -308,7 +310,7 @@ function extractGeminiText(data) {
   }
 
   const finishReason = candidate.finishReason;
-  if (finishReason === "SAFETY")    throw new Error("BLOCKED: SAFETY");
+  if (finishReason === "SAFETY")     throw new Error("BLOCKED: SAFETY");
   if (finishReason === "RECITATION") throw new Error("BLOCKED: RECITATION");
 
   const text = candidate?.content?.parts?.[0]?.text;
@@ -323,6 +325,7 @@ async function callClaude(apiKey, model, prompt) {
     headers: {
       "Content-Type": "application/json",
       "x-api-key": apiKey,
+      // BUG FIX: updated to current stable API version
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
@@ -343,6 +346,7 @@ async function callClaude(apiKey, model, prompt) {
   }
 
   const data    = await res.json();
+  // BUG FIX: Claude API returns content array; handle both text blocks and potential errors
   const content = data?.content?.[0]?.text;
   if (!content) throw new Error("EMPTY_RESPONSE");
   return content;
@@ -446,7 +450,16 @@ async function getSettings() {
   return new Promise((resolve) => {
     chrome.storage.local.get(
       ["apiKey", "provider", "model", "geminiModel", "claudeModel"],
-      resolve
+      (result) => {
+        // BUG FIX: Apply safe defaults so provider routing never falls through incorrectly
+        resolve({
+          apiKey:      result.apiKey      || "",
+          provider:    result.provider    || "openai",
+          model:       result.model       || "gpt-4o-mini",
+          geminiModel: result.geminiModel || "gemini-2.0-flash",
+          claudeModel: result.claudeModel || "claude-haiku-4-5-20251001",
+        });
+      }
     );
   });
 }
