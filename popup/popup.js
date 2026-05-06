@@ -102,13 +102,21 @@
     el.clearBtn.hidden   = true;
 
     try {
-      await ensureContentScript(state.activeTab.id);
-
-      const extracted = await sendToTab(state.activeTab.id, { type: "EXTRACT_CONTENT" });
+      // BUG FIX: ensureContentScript now returns the extracted content if available,
+      // so we don't make a redundant second message. Also uses longer timeout.
+      const extracted = await ensureContentScriptAndExtract(state.activeTab.id);
 
       if (!extracted) {
         throw new Error(
           "Could not connect to this page. Try refreshing the page (Ctrl+R) and summarizing again."
+        );
+      }
+
+      // BUG FIX: check for error object returned from content script
+      if (extracted.error) {
+        throw new Error(
+          "Failed to extract page content: " + extracted.error +
+          ". Try refreshing the page and summarizing again."
         );
       }
 
@@ -149,21 +157,28 @@
     }
   }
 
-  // ── Inject content script if needed ───────────────────────────────────────
-  async function ensureContentScript(tabId) {
-    try {
-      const probe = await sendToTab(tabId, { type: "EXTRACT_CONTENT" });
-      if (probe !== null) return;
-    } catch (e) {
-      // fall through to injection
-    }
+  // ── BUG FIX: Combined inject + extract to avoid double message and timing issues ──
+  async function ensureContentScriptAndExtract(tabId) {
+    // First attempt: content script may already be injected
+    const firstAttempt = await sendToTab(tabId, { type: "EXTRACT_CONTENT" });
+    if (firstAttempt !== null) return firstAttempt;
 
+    // Content script not responding — inject it
     try {
       await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
-      await sleep(150);
     } catch (e) {
-      // Injection may fail on restricted pages — caller handles null response
+      // Injection failed (restricted page or permission issue)
+      return null;
     }
+
+    // BUG FIX: Wait longer and retry up to 3 times to handle slow page loads
+    for (let i = 0; i < 3; i++) {
+      await sleep(300);
+      const attempt = await sendToTab(tabId, { type: "EXTRACT_CONTENT" });
+      if (attempt !== null) return attempt;
+    }
+
+    return null;
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
