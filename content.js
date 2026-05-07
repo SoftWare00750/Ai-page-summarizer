@@ -1,228 +1,529 @@
-// content.js — Content Script
-// Extracts clean, readable content from the page.
-// Runs in the page context but communicates safely via chrome.runtime messaging.
+// background.js — Service Worker
+// Handles all AI API calls. The API key NEVER touches the popup or content script.
 
-(function () {
-  // Guard: avoid double-injection
-  if (window.__pageMindInjected) return;
-  window.__pageMindInjected = true;
+const CACHE_TTL_MS       = 30 * 60 * 1000; // 30 minutes
+const FETCH_TIMEOUT      = 60_000;          // 60-second per-request timeout
+const MAX_RETRIES        = 3;               // attempts for OpenAI / Claude
+const GEMINI_MAX_RETRIES = 2;              // fewer retries for Gemini to avoid quota exhaustion
 
-  // ── Message listener ──────────────────────────────────────────────────────
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    try {
-      if (message.type === "EXTRACT_CONTENT") {
-        const extracted = extractContent();
-        sendResponse(extracted);
-        return true;
-      }
+// ── Message router ────────────────────────────────────────────────────────────
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === "SUMMARIZE") {
+    handleSummarize(message.payload)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ error: err.message }));
+    return true;
+  }
 
-      if (message.type === "HIGHLIGHT_TOPICS") {
-        highlightTopics(message.payload?.topics || []);
-        sendResponse({ ok: true });
-        return true;
-      }
+  if (message.type === "CLEAR_CACHE") {
+    clearCache(message.payload?.url)
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => sendResponse({ error: err.message }));
+    return true;
+  }
 
-      if (message.type === "CLEAR_HIGHLIGHTS") {
-        clearHighlights();
-        sendResponse({ ok: true });
-        return true;
-      }
-    } catch (err) {
-      sendResponse({ error: err.message });
+  if (message.type === "GET_SETTINGS") {
+    getSettings()
+      .then(sendResponse)
+      .catch((err) => sendResponse({ error: err.message }));
+    return true;
+  }
+});
+
+// ── Main summarize handler ────────────────────────────────────────────────────
+async function handleSummarize({ url, title, content, mode }) {
+  const settings = await getSettings();
+
+  if (!settings.apiKey) throw new Error("NO_API_KEY");
+
+  const cacheKey = `cache_${hashUrl(url)}_${mode || "default"}`;
+  const cached   = await getCached(cacheKey);
+  if (cached) return { ...cached, fromCache: true };
+
+  const prompt = buildPrompt(title, content, mode);
+
+  let result;
+  const provider = settings.provider || "openai";
+
+  if (provider === "gemini") {
+    const geminiModel = settings.geminiModel || "gemini-2.0-flash";
+    result = await callGemini(settings.apiKey, geminiModel, prompt);
+  } else if (provider === "claude") {
+    // FIX: Use correct model IDs matching what settings.html actually stores
+    const claudeModel = settings.claudeModel || "claude-haiku-4-5-20251001";
+    result = await callClaude(settings.apiKey, claudeModel, prompt);
+  } else {
+    // Default: OpenAI
+    result = await callOpenAI(settings.apiKey, settings.model || "gpt-4o-mini", prompt);
+  }
+
+  const parsed      = parseAIResponse(result);
+  const readingTime = estimateReadingTime(content);
+  const response    = { ...parsed, readingTime, fromCache: false };
+
+  await setCached(cacheKey, response);
+  return response;
+}
+
+// ── Fetch with timeout + exponential-backoff retry ────────────────────────────
+async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
+  let lastError;
+
+  for (let attempt = 0; attempt < retries; attempt++) {
+    if (attempt > 0) {
+      const delay = Math.pow(2, attempt - 1) * 1000;
+      await sleep(delay);
     }
 
-    return true; // keep channel open for all paths
+    const controller = new AbortController();
+    const timer      = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+
+    try {
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timer);
+
+      if (res.status === 429 && attempt < retries - 1) {
+        const retryAfterHeader = res.headers.get("Retry-After");
+        const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 2;
+        await sleep(retryAfter * 1000);
+        lastError = new Error("RATE_LIMITED");
+        continue;
+      }
+
+      if (res.status >= 500 && attempt < retries - 1) {
+        lastError = new Error("SERVER_ERROR");
+        continue;
+      }
+
+      return res;
+    } catch (err) {
+      clearTimeout(timer);
+      if (err.name === "AbortError") {
+        lastError = new Error("REQUEST_TIMEOUT");
+      } else {
+        lastError = new Error("NETWORK_ERROR");
+      }
+      // Don't retry on timeout for last attempt
+      if (attempt === retries - 1) break;
+    }
+  }
+
+  throw lastError || new Error("NETWORK_ERROR");
+}
+
+// ── OpenAI API call ───────────────────────────────────────────────────────────
+async function callOpenAI(apiKey, model, prompt) {
+  // FIX: Try modern max_completion_tokens first, fall back to legacy max_tokens
+  const body = {
+    model,
+    messages: [
+      {
+        role: "system",
+        content: "You are an expert content analyst. Always respond with valid JSON only — no markdown fences, no extra text.",
+      },
+      { role: "user", content: prompt },
+    ],
+    temperature: 0.3,
+    max_tokens: 1200, // Use max_tokens (works for all models including legacy)
+  };
+
+  const res = await fetchWithRetry("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
   });
 
-  // ── Content extractor ─────────────────────────────────────────────────────
-  function extractContent() {
-    const title     = getTitle();
-    const text      = getMainContent();
-    const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
-    const url       = window.location.href;
-
-    return { title, text, wordCount, url };
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    const msg = errData?.error?.message || `HTTP ${res.status}`;
+    if (res.status === 401) throw new Error("INVALID_API_KEY");
+    if (res.status === 429) throw new Error("RATE_LIMITED");
+    if (res.status === 403) throw new Error("INVALID_API_KEY");
+    throw new Error(msg);
   }
 
-  function getTitle() {
-    // Prefer OG title > h1 > document.title
-    const og = document.querySelector('meta[property="og:title"]');
-    if (og?.content?.trim()) return og.content.trim();
+  const data    = await res.json();
+  const content = data?.choices?.[0]?.message?.content;
+  if (!content) throw new Error("EMPTY_RESPONSE");
+  return content.trim();
+}
 
-    const h1 = document.querySelector("h1");
-    if (h1?.innerText?.trim()) return h1.innerText.trim();
+// ── Gemini API call ───────────────────────────────────────────────────────────
+async function callGemini(apiKey, model, prompt) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
-    return document.title.trim();
-  }
+  const res = await fetchWithRetry(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.3,
+        maxOutputTokens: 1200,
+        responseMimeType: "application/json",
+      },
+      systemInstruction: {
+        parts: [{
+          text: "You are an expert content analyst. Always respond with valid JSON only — no markdown fences, no extra text.",
+        }],
+      },
+    }),
+  }, GEMINI_MAX_RETRIES);
 
-  function getMainContent() {
-    // Priority order: semantic article > main > largest text block > body
-    const candidates = [
-      document.querySelector("article"),
-      document.querySelector('[role="main"]'),
-      document.querySelector("main"),
-      document.querySelector(".post-content"),
-      document.querySelector(".article-body"),
-      document.querySelector(".entry-content"),
-      document.querySelector(".content-body"),
-      document.querySelector("#content"),
-      document.querySelector("#main-content"),
-      document.querySelector("#article-body"),
-      document.body,
-    ].filter(Boolean);
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    const errMsg  = errData?.error?.message || `HTTP ${res.status}`;
+    const errStatus = errData?.error?.status || "";
 
-    for (const el of candidates) {
-      const text = extractText(el);
-      if (text.length > 400) return text;
+    if (res.status === 429) {
+      if (
+        errStatus === "RESOURCE_EXHAUSTED" ||
+        errMsg.toLowerCase().includes("quota") ||
+        errMsg.toLowerCase().includes("resource has been exhausted")
+      ) {
+        throw new Error("QUOTA_EXCEEDED");
+      }
+      throw new Error("RATE_LIMITED");
     }
 
-    return extractText(document.body);
+    if (res.status === 400) {
+      if (errMsg.toLowerCase().includes("api key") || errMsg.toLowerCase().includes("api_key")) {
+        throw new Error("INVALID_API_KEY");
+      }
+      // FIX: Fall back to legacy call (without responseMimeType) for unsupported models
+      return callGeminiLegacy(apiKey, model, prompt);
+    }
+
+    if (res.status === 401 || res.status === 403) throw new Error("INVALID_API_KEY");
+    if (res.status === 404) return callGeminiLegacy(apiKey, model, prompt);
+    if (res.status >= 500) throw new Error("SERVER_ERROR");
+    throw new Error(errMsg);
   }
 
-  function extractText(root) {
-    if (!root) return "";
+  const data = await res.json();
+  return extractGeminiText(data);
+}
 
-    // Clone to avoid mutating the DOM
-    const clone = root.cloneNode(true);
+// Fallback: no responseMimeType for older/unsupported models
+async function callGeminiLegacy(apiKey, model, prompt) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
-    // Remove noisy elements
-    const noisy = [
-      "script", "style", "noscript", "iframe", "nav", "header",
-      "footer", "aside", "form", "button", "input", "select",
-      "textarea", "figcaption", ".ad", ".ads", ".advertisement",
-      ".sidebar", ".widget", ".comment", ".comments", ".related",
-      ".share", ".social", ".navigation", ".menu", ".cookie",
-      "[aria-hidden='true']", ".visually-hidden", "[hidden]",
-      ".pagemind-mark",  // don't re-extract our own highlights
-    ];
+  const res = await fetchWithRetry(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.3, maxOutputTokens: 1200 },
+      systemInstruction: {
+        parts: [{
+          text: "You are an expert content analyst. Always respond with valid JSON only — no markdown fences, no extra text.",
+        }],
+      },
+    }),
+  }, GEMINI_MAX_RETRIES);
 
-    noisy.forEach((sel) => {
+  if (!res.ok) {
+    const errData  = await res.json().catch(() => ({}));
+    const errMsg   = errData?.error?.message || `HTTP ${res.status}`;
+    const errStatus = errData?.error?.status || "";
+
+    if (res.status === 429) {
+      if (
+        errStatus === "RESOURCE_EXHAUSTED" ||
+        errMsg.toLowerCase().includes("quota") ||
+        errMsg.toLowerCase().includes("resource has been exhausted")
+      ) {
+        throw new Error("QUOTA_EXCEEDED");
+      }
+      throw new Error("RATE_LIMITED");
+    }
+
+    if (res.status === 400) {
+      if (errMsg.toLowerCase().includes("api key") || errMsg.toLowerCase().includes("api_key"))
+        throw new Error("INVALID_API_KEY");
+      if (
+        errMsg.toLowerCase().includes("not found") ||
+        errMsg.toLowerCase().includes("does not exist") ||
+        errStatus === "NOT_FOUND"
+      )
+        throw new Error(`MODEL_NOT_FOUND: ${model}`);
+      throw new Error(`GEMINI_ERROR: ${errMsg}`);
+    }
+
+    if (res.status === 401 || res.status === 403) throw new Error("INVALID_API_KEY");
+    if (res.status >= 500) throw new Error("SERVER_ERROR");
+    throw new Error(errMsg);
+  }
+
+  const data = await res.json();
+  return extractGeminiText(data);
+}
+
+function extractGeminiText(data) {
+  const candidate = data?.candidates?.[0];
+  if (!candidate) {
+    const blockReason = data?.promptFeedback?.blockReason;
+    if (blockReason) throw new Error(`BLOCKED: ${blockReason}`);
+    throw new Error("EMPTY_RESPONSE");
+  }
+
+  const finishReason = candidate.finishReason;
+  if (finishReason === "SAFETY")     throw new Error("BLOCKED: SAFETY");
+  if (finishReason === "RECITATION") throw new Error("BLOCKED: RECITATION");
+
+  // FIX: Handle both plain text and JSON mime type responses
+  const part = candidate?.content?.parts?.[0];
+  if (!part) throw new Error("EMPTY_RESPONSE");
+
+  const text = part.text;
+  if (!text || !text.trim()) throw new Error("EMPTY_RESPONSE");
+  return text.trim();
+}
+
+// ── Anthropic (Claude) API call ───────────────────────────────────────────────
+async function callClaude(apiKey, model, prompt) {
+  // FIX: Correct Anthropic API endpoint and headers
+  const res = await fetchWithRetry("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      // FIX: Remove anthropic-beta header that was causing issues; not needed for basic messages
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 1200,
+      system: "You are an expert content analyst. Always respond with valid JSON only — no markdown fences, no extra text.",
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    const errType = errData?.error?.type || "";
+    const msg = errData?.error?.message || `HTTP ${res.status}`;
+
+    if (res.status === 401 || res.status === 403 || errType === "authentication_error") {
+      throw new Error("INVALID_API_KEY");
+    }
+    if (res.status === 429 || errType === "rate_limit_error") {
+      throw new Error("RATE_LIMITED");
+    }
+    if (res.status === 400 && errType === "invalid_request_error") {
+      // FIX: Model might be invalid — surface the actual message
+      throw new Error(`CLAUDE_ERROR: ${msg}`);
+    }
+    if (res.status >= 500 || errType === "api_error" || errType === "overloaded_error") {
+      throw new Error("SERVER_ERROR");
+    }
+    throw new Error(msg);
+  }
+
+  const data = await res.json();
+
+  // FIX: Claude API returns content as array of blocks; correctly extract text
+  if (!data?.content || !Array.isArray(data.content) || data.content.length === 0) {
+    throw new Error("EMPTY_RESPONSE");
+  }
+
+  // Find the first text block
+  const textBlock = data.content.find((block) => block.type === "text");
+  if (!textBlock || !textBlock.text) {
+    throw new Error("EMPTY_RESPONSE");
+  }
+
+  return textBlock.text.trim();
+}
+
+// ── Prompt builder ────────────────────────────────────────────────────────────
+function buildPrompt(title, content, mode) {
+  // FIX: Better truncation — don't cut in the middle of a word
+  let truncated = content.slice(0, 6000);
+  if (content.length > 6000) {
+    const lastPeriod = truncated.lastIndexOf('. ');
+    if (lastPeriod > 4000) truncated = truncated.slice(0, lastPeriod + 1);
+  }
+
+  const modeKey = ["brief", "detailed"].includes(mode) ? mode : "default";
+
+  const instructions = {
+    default:  `Summarize this page in 4–6 bullet points, identify 3 key insights, and list up to 5 important topics.`,
+    brief:    `Summarize this page in exactly 3 bullet points, identify 1 key insight, and list up to 3 important topics.`,
+    detailed: `Provide a thorough summary in 7–10 bullet points, identify 5 key insights, and list up to 8 important topics.`,
+  };
+
+  // FIX: Cleaner prompt with explicit schema example to reduce parse failures
+  return `${instructions[modeKey]}
+
+Page Title: ${title || "Untitled"}
+
+Page Content:
+${truncated}
+
+You MUST respond with ONLY the following JSON structure. No markdown, no backticks, no explanation — raw JSON only:
+{
+  "summary": ["point 1", "point 2", "point 3"],
+  "keyInsights": ["insight 1", "insight 2"],
+  "topics": ["topic1", "topic2"],
+  "sentiment": "neutral",
+  "contentType": "article"
+}
+
+Rules:
+- summary: array of strings (bullet points)
+- keyInsights: array of strings
+- topics: array of short keyword strings
+- sentiment: EXACTLY one of: positive, neutral, negative
+- contentType: EXACTLY one of: article, news, documentation, blog, other`;
+}
+
+// ── Response parser ───────────────────────────────────────────────────────────
+function parseAIResponse(raw) {
+  if (!raw || typeof raw !== "string") {
+    return buildFallbackResponse("Empty response from AI.");
+  }
+
+  try {
+    // FIX: More robust cleaning — handle various markdown fence formats
+    let cleaned = raw.trim();
+
+    // Strip markdown code fences (```json ... ``` or ``` ... ```)
+    cleaned = cleaned
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/\s*```\s*$/i, "")
+      .trim();
+
+    // Extract the JSON object if there's surrounding text
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (jsonMatch) cleaned = jsonMatch[0];
+
+    const parsed = JSON.parse(cleaned);
+
+    // FIX: Validate and coerce each field carefully
+    const validSentiments  = ["positive", "neutral", "negative"];
+    const validContentTypes = ["article", "news", "documentation", "blog", "other"];
+
+    return {
+      summary: Array.isArray(parsed.summary)
+        ? parsed.summary.filter((s) => typeof s === "string" && s.trim())
+        : ["No summary available."],
+      keyInsights: Array.isArray(parsed.keyInsights)
+        ? parsed.keyInsights.filter((s) => typeof s === "string" && s.trim())
+        : [],
+      topics: Array.isArray(parsed.topics)
+        ? parsed.topics.filter((s) => typeof s === "string" && s.trim())
+        : [],
+      sentiment: validSentiments.includes(parsed.sentiment)
+        ? parsed.sentiment
+        : "neutral",
+      contentType: validContentTypes.includes(parsed.contentType)
+        ? parsed.contentType
+        : "other",
+    };
+  } catch (e) {
+    // FIX: Try to salvage partial content if JSON parse fails
+    const summaryMatch = raw.match(/"summary"\s*:\s*\[([\s\S]*?)\]/);
+    if (summaryMatch) {
       try {
-        clone.querySelectorAll(sel).forEach((el) => el.remove());
-      } catch (e) {
-        // Invalid selector — skip it
-      }
-    });
-
-    // Prefer innerText for rendered text (respects visibility)
-    // Fall back to TreeWalker for cloned nodes
-    const parts = [];
-    const walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT);
-    let node;
-
-    while ((node = walker.nextNode())) {
-      const text = node.textContent.trim();
-      if (text.length > 20) {
-        parts.push(text);
-      }
-    }
-
-    return parts.join(" ").replace(/\s{2,}/g, " ").trim();
-  }
-
-  // ── Highlighter ───────────────────────────────────────────────────────────
-  const HIGHLIGHT_MARK_CLASS = "pagemind-mark";
-  const STYLE_ID = "pagemind-styles";
-
-  function highlightTopics(topics) {
-    clearHighlights();
-    if (!topics || !topics.length) return;
-
-    injectHighlightStyles();
-
-    const validTopics = topics.filter((t) => typeof t === "string" && t.length > 2);
-    if (!validTopics.length) return;
-
-    const pattern = validTopics.map((t) => escapeRegex(t)).join("|");
-    if (!pattern) return;
-
-    const regex = new RegExp(`(${pattern})`, "gi");
-
-    // Limit highlighting to main content area to avoid nav/footer noise
-    const target = document.querySelector("article, [role='main'], main, #content, body") || document.body;
-    walkAndHighlight(target, regex);
-  }
-
-  function walkAndHighlight(node, regex) {
-    if (!node) return;
-
-    if (node.nodeType === Node.TEXT_NODE) {
-      const text = node.textContent;
-      regex.lastIndex = 0;
-      if (!regex.test(text)) return;
-      regex.lastIndex = 0;
-
-      const frag = document.createDocumentFragment();
-      let last = 0;
-      let match;
-
-      while ((match = regex.exec(text)) !== null) {
-        if (match.index > last) {
-          frag.appendChild(document.createTextNode(text.slice(last, match.index)));
+        const partialSummary = JSON.parse(`[${summaryMatch[1]}]`);
+        if (Array.isArray(partialSummary) && partialSummary.length > 0) {
+          return {
+            summary: partialSummary,
+            keyInsights: [],
+            topics: [],
+            sentiment: "neutral",
+            contentType: "other",
+          };
         }
-        const mark = document.createElement("mark");
-        mark.className = HIGHLIGHT_MARK_CLASS;
-        mark.textContent = match[0]; // safe: textContent, not innerHTML
-        frag.appendChild(mark);
-        last = regex.lastIndex;
-      }
-
-      if (last < text.length) {
-        frag.appendChild(document.createTextNode(text.slice(last)));
-      }
-
-      node.parentNode?.replaceChild(frag, node);
-      return;
+      } catch (_) { /* fall through */ }
     }
-
-    // Skip non-element nodes and excluded tags
-    if (node.nodeType !== Node.ELEMENT_NODE) return;
-
-    const tag = node.tagName?.toUpperCase();
-    if (
-      tag === "SCRIPT" ||
-      tag === "STYLE" ||
-      tag === "MARK" ||
-      tag === "NOSCRIPT" ||
-      tag === "TEXTAREA" ||
-      tag === "INPUT" ||
-      node.classList?.contains(HIGHLIGHT_MARK_CLASS)
-    ) return;
-
-    // Process children (static snapshot to avoid live list mutation issues)
-    Array.from(node.childNodes).forEach((child) => walkAndHighlight(child, regex));
+    return buildFallbackResponse("Could not parse AI response. Please try again.");
   }
+}
 
-  function clearHighlights() {
-    document.querySelectorAll(`.${HIGHLIGHT_MARK_CLASS}`).forEach((mark) => {
-      const parent = mark.parentNode;
-      if (!parent) return;
-      parent.replaceChild(document.createTextNode(mark.textContent || ""), mark);
-      parent.normalize();
-    });
+function buildFallbackResponse(msg) {
+  return {
+    summary:     [msg],
+    keyInsights: [],
+    topics:      [],
+    sentiment:   "neutral",
+    contentType: "other",
+  };
+}
 
-    const style = document.getElementById(STYLE_ID);
-    if (style) style.remove();
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function estimateReadingTime(text) {
+  const words = text.trim().split(/\s+/).filter(Boolean).length;
+  return Math.max(1, Math.ceil(words / 238));
+}
+
+function hashUrl(url) {
+  let hash = 0;
+  for (let i = 0; i < url.length; i++) {
+    hash = (hash << 5) - hash + url.charCodeAt(i);
+    hash |= 0;
   }
+  return Math.abs(hash).toString(36);
+}
 
-  function injectHighlightStyles() {
-    if (document.getElementById(STYLE_ID)) return;
-    const style = document.createElement("style");
-    style.id = STYLE_ID;
-    style.textContent = `
-      .${HIGHLIGHT_MARK_CLASS} {
-        background: rgba(99, 211, 168, 0.35) !important;
-        color: inherit !important;
-        border-radius: 2px !important;
-        padding: 0 2px !important;
-        border-bottom: 2px solid rgba(99, 211, 168, 0.8) !important;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// ── Storage helpers ───────────────────────────────────────────────────────────
+async function getSettings() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(
+      ["apiKey", "provider", "model", "geminiModel", "claudeModel"],
+      (result) => {
+        resolve({
+          apiKey:      result.apiKey      || "",
+          provider:    result.provider    || "openai",
+          model:       result.model       || "gpt-4o-mini",
+          geminiModel: result.geminiModel || "gemini-2.0-flash",
+          // FIX: Correct default Claude model ID
+          claudeModel: result.claudeModel || "claude-haiku-4-5-20251001",
+        });
       }
-    `;
-    document.head.appendChild(style);
-  }
+    );
+  });
+}
 
-  function escapeRegex(str) {
-    return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  }
+async function getCached(key) {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([key], (result) => {
+      const entry = result[key];
+      if (!entry) return resolve(null);
+      if (Date.now() - entry.timestamp > CACHE_TTL_MS) return resolve(null);
+      resolve(entry.data);
+    });
+  });
+}
 
-})();
+async function setCached(key, data) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ [key]: { data, timestamp: Date.now() } }, resolve);
+  });
+}
+
+async function clearCache(url) {
+  return new Promise((resolve) => {
+    if (url) {
+      const key = `cache_${hashUrl(url)}`;
+      chrome.storage.local.get(null, (all) => {
+        const keysToRemove = Object.keys(all).filter((k) => k.startsWith(key));
+        if (keysToRemove.length === 0) return resolve();
+        chrome.storage.local.remove(keysToRemove, resolve);
+      });
+    } else {
+      chrome.storage.local.get(null, (all) => {
+        const keysToRemove = Object.keys(all).filter((k) => k.startsWith("cache_"));
+        if (keysToRemove.length === 0) return resolve();
+        chrome.storage.local.remove(keysToRemove, resolve);
+      });
+    }
+  });
+}

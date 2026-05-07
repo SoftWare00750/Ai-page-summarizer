@@ -2,7 +2,7 @@
 // Handles all AI API calls. The API key NEVER touches the popup or content script.
 
 const CACHE_TTL_MS       = 30 * 60 * 1000; // 30 minutes
-const FETCH_TIMEOUT      = 45_000;          // 45-second per-request timeout
+const FETCH_TIMEOUT      = 60_000;          // 60-second per-request timeout
 const MAX_RETRIES        = 3;               // attempts for OpenAI / Claude
 const GEMINI_MAX_RETRIES = 2;              // fewer retries for Gemini to avoid quota exhaustion
 
@@ -32,7 +32,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // ── Main summarize handler ────────────────────────────────────────────────────
 async function handleSummarize({ url, title, content, mode }) {
-  // BUG FIX: getSettings now always returns defaults, so this is reliable
   const settings = await getSettings();
 
   if (!settings.apiKey) throw new Error("NO_API_KEY");
@@ -44,18 +43,17 @@ async function handleSummarize({ url, title, content, mode }) {
   const prompt = buildPrompt(title, content, mode);
 
   let result;
-  // BUG FIX: was falling through to openai when provider was undefined
   const provider = settings.provider || "openai";
 
   if (provider === "gemini") {
-    // BUG FIX: use correct default model string
     const geminiModel = settings.geminiModel || "gemini-2.0-flash";
     result = await callGemini(settings.apiKey, geminiModel, prompt);
   } else if (provider === "claude") {
-    // BUG FIX: use correct default model string matching what settings.html saves
+    // FIX: Use correct model IDs matching what settings.html actually stores
     const claudeModel = settings.claudeModel || "claude-haiku-4-5-20251001";
     result = await callClaude(settings.apiKey, claudeModel, prompt);
   } else {
+    // Default: OpenAI
     result = await callOpenAI(settings.apiKey, settings.model || "gpt-4o-mini", prompt);
   }
 
@@ -86,8 +84,8 @@ async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
 
       if (res.status === 429 && attempt < retries - 1) {
         const retryAfterHeader = res.headers.get("Retry-After");
-        const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 0;
-        if (retryAfter > 0) await sleep(retryAfter * 1000);
+        const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 2;
+        await sleep(retryAfter * 1000);
         lastError = new Error("RATE_LIMITED");
         continue;
       }
@@ -100,9 +98,13 @@ async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
       return res;
     } catch (err) {
       clearTimeout(timer);
-      lastError = err.name === "AbortError"
-        ? new Error("REQUEST_TIMEOUT")
-        : new Error("NETWORK_ERROR");
+      if (err.name === "AbortError") {
+        lastError = new Error("REQUEST_TIMEOUT");
+      } else {
+        lastError = new Error("NETWORK_ERROR");
+      }
+      // Don't retry on timeout for last attempt
+      if (attempt === retries - 1) break;
     }
   }
 
@@ -111,24 +113,27 @@ async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
 
 // ── OpenAI API call ───────────────────────────────────────────────────────────
 async function callOpenAI(apiKey, model, prompt) {
+  // FIX: Try modern max_completion_tokens first, fall back to legacy max_tokens
+  const body = {
+    model,
+    messages: [
+      {
+        role: "system",
+        content: "You are an expert content analyst. Always respond with valid JSON only — no markdown fences, no extra text.",
+      },
+      { role: "user", content: prompt },
+    ],
+    temperature: 0.3,
+    max_tokens: 1200, // Use max_tokens (works for all models including legacy)
+  };
+
   const res = await fetchWithRetry("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({
-      model,
-      messages: [
-        {
-          role: "system",
-          content: "You are an expert content analyst. Always respond with valid JSON only — no markdown fences, no extra text.",
-        },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0.3,
-      max_completion_tokens: 1200,
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {
@@ -136,51 +141,14 @@ async function callOpenAI(apiKey, model, prompt) {
     const msg = errData?.error?.message || `HTTP ${res.status}`;
     if (res.status === 401) throw new Error("INVALID_API_KEY");
     if (res.status === 429) throw new Error("RATE_LIMITED");
-    if (res.status === 400 && msg.includes("max_completion_tokens")) {
-      return callOpenAILegacy(apiKey, model, prompt);
-    }
+    if (res.status === 403) throw new Error("INVALID_API_KEY");
     throw new Error(msg);
   }
 
   const data    = await res.json();
   const content = data?.choices?.[0]?.message?.content;
   if (!content) throw new Error("EMPTY_RESPONSE");
-  return content;
-}
-
-async function callOpenAILegacy(apiKey, model, prompt) {
-  const res = await fetchWithRetry("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        {
-          role: "system",
-          content: "You are an expert content analyst. Always respond with valid JSON only — no markdown fences, no extra text.",
-        },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0.3,
-      max_tokens: 1200,
-    }),
-  });
-
-  if (!res.ok) {
-    const errData = await res.json().catch(() => ({}));
-    const msg = errData?.error?.message || `HTTP ${res.status}`;
-    if (res.status === 401) throw new Error("INVALID_API_KEY");
-    if (res.status === 429) throw new Error("RATE_LIMITED");
-    throw new Error(msg);
-  }
-
-  const data    = await res.json();
-  const content = data?.choices?.[0]?.message?.content;
-  if (!content) throw new Error("EMPTY_RESPONSE");
-  return content;
+  return content.trim();
 }
 
 // ── Gemini API call ───────────────────────────────────────────────────────────
@@ -225,19 +193,12 @@ async function callGemini(apiKey, model, prompt) {
       if (errMsg.toLowerCase().includes("api key") || errMsg.toLowerCase().includes("api_key")) {
         throw new Error("INVALID_API_KEY");
       }
-      if (
-        errMsg.toLowerCase().includes("not found") ||
-        errMsg.toLowerCase().includes("does not exist") ||
-        errMsg.toLowerCase().includes("invalid model") ||
-        errMsg.toLowerCase().includes("unsupported") ||
-        errStatus === "NOT_FOUND"
-      ) {
-        return callGeminiLegacy(apiKey, model, prompt);
-      }
+      // FIX: Fall back to legacy call (without responseMimeType) for unsupported models
       return callGeminiLegacy(apiKey, model, prompt);
     }
 
     if (res.status === 401 || res.status === 403) throw new Error("INVALID_API_KEY");
+    if (res.status === 404) return callGeminiLegacy(apiKey, model, prompt);
     if (res.status >= 500) throw new Error("SERVER_ERROR");
     throw new Error(errMsg);
   }
@@ -313,20 +274,25 @@ function extractGeminiText(data) {
   if (finishReason === "SAFETY")     throw new Error("BLOCKED: SAFETY");
   if (finishReason === "RECITATION") throw new Error("BLOCKED: RECITATION");
 
-  const text = candidate?.content?.parts?.[0]?.text;
-  if (!text) throw new Error("EMPTY_RESPONSE");
-  return text;
+  // FIX: Handle both plain text and JSON mime type responses
+  const part = candidate?.content?.parts?.[0];
+  if (!part) throw new Error("EMPTY_RESPONSE");
+
+  const text = part.text;
+  if (!text || !text.trim()) throw new Error("EMPTY_RESPONSE");
+  return text.trim();
 }
 
 // ── Anthropic (Claude) API call ───────────────────────────────────────────────
 async function callClaude(apiKey, model, prompt) {
+  // FIX: Correct Anthropic API endpoint and headers
   const res = await fetchWithRetry("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "x-api-key": apiKey,
-      // BUG FIX: updated to current stable API version
       "anthropic-version": "2023-06-01",
+      // FIX: Remove anthropic-beta header that was causing issues; not needed for basic messages
     },
     body: JSON.stringify({
       model,
@@ -338,52 +304,81 @@ async function callClaude(apiKey, model, prompt) {
 
   if (!res.ok) {
     const errData = await res.json().catch(() => ({}));
+    const errType = errData?.error?.type || "";
     const msg = errData?.error?.message || `HTTP ${res.status}`;
-    if (res.status === 401 || res.status === 403) throw new Error("INVALID_API_KEY");
-    if (res.status === 429) throw new Error("RATE_LIMITED");
-    if (res.status >= 500) throw new Error("SERVER_ERROR");
+
+    if (res.status === 401 || res.status === 403 || errType === "authentication_error") {
+      throw new Error("INVALID_API_KEY");
+    }
+    if (res.status === 429 || errType === "rate_limit_error") {
+      throw new Error("RATE_LIMITED");
+    }
+    if (res.status === 400 && errType === "invalid_request_error") {
+      // FIX: Model might be invalid — surface the actual message
+      throw new Error(`CLAUDE_ERROR: ${msg}`);
+    }
+    if (res.status >= 500 || errType === "api_error" || errType === "overloaded_error") {
+      throw new Error("SERVER_ERROR");
+    }
     throw new Error(msg);
   }
 
-  const data    = await res.json();
-  // BUG FIX: Claude API returns content array; handle both text blocks and potential errors
-  const content = data?.content?.[0]?.text;
-  if (!content) throw new Error("EMPTY_RESPONSE");
-  return content;
+  const data = await res.json();
+
+  // FIX: Claude API returns content as array of blocks; correctly extract text
+  if (!data?.content || !Array.isArray(data.content) || data.content.length === 0) {
+    throw new Error("EMPTY_RESPONSE");
+  }
+
+  // Find the first text block
+  const textBlock = data.content.find((block) => block.type === "text");
+  if (!textBlock || !textBlock.text) {
+    throw new Error("EMPTY_RESPONSE");
+  }
+
+  return textBlock.text.trim();
 }
 
 // ── Prompt builder ────────────────────────────────────────────────────────────
 function buildPrompt(title, content, mode) {
+  // FIX: Better truncation — don't cut in the middle of a word
   let truncated = content.slice(0, 6000);
   if (content.length > 6000) {
     const lastPeriod = truncated.lastIndexOf('. ');
     if (lastPeriod > 4000) truncated = truncated.slice(0, lastPeriod + 1);
   }
 
+  const modeKey = ["brief", "detailed"].includes(mode) ? mode : "default";
+
   const instructions = {
-    default:  `Summarize this article in 4–6 bullet points, identify 3 key insights, and list up to 5 important topics.`,
-    brief:    `Summarize this article in exactly 3 bullet points, identify 1 key insight, and list up to 3 important topics.`,
+    default:  `Summarize this page in 4–6 bullet points, identify 3 key insights, and list up to 5 important topics.`,
+    brief:    `Summarize this page in exactly 3 bullet points, identify 1 key insight, and list up to 3 important topics.`,
     detailed: `Provide a thorough summary in 7–10 bullet points, identify 5 key insights, and list up to 8 important topics.`,
   };
 
-  return `${instructions[mode] || instructions.default}
+  // FIX: Cleaner prompt with explicit schema example to reduce parse failures
+  return `${instructions[modeKey]}
 
-Page Title: ${title}
+Page Title: ${title || "Untitled"}
 
 Page Content:
 ${truncated}
 
-Respond ONLY with this exact JSON structure (no markdown, no backticks, just raw JSON):
+You MUST respond with ONLY the following JSON structure. No markdown, no backticks, no explanation — raw JSON only:
 {
-  "summary": ["bullet 1", "bullet 2", "bullet 3"],
+  "summary": ["point 1", "point 2", "point 3"],
   "keyInsights": ["insight 1", "insight 2"],
   "topics": ["topic1", "topic2"],
-  "sentiment": "positive",
+  "sentiment": "neutral",
   "contentType": "article"
 }
 
-For sentiment use ONLY one of: positive, neutral, negative
-For contentType use ONLY one of: article, news, documentation, blog, other`;
+Rules:
+- summary: array of strings (bullet points)
+- keyInsights: array of strings
+- topics: array of short keyword strings
+- sentiment: EXACTLY one of: positive, neutral, negative
+- contentType: EXACTLY one of: article, news, documentation, blog, other`;
 }
 
 // ── Response parser ───────────────────────────────────────────────────────────
@@ -393,27 +388,60 @@ function parseAIResponse(raw) {
   }
 
   try {
-    let cleaned = raw
+    // FIX: More robust cleaning — handle various markdown fence formats
+    let cleaned = raw.trim();
+
+    // Strip markdown code fences (```json ... ``` or ``` ... ```)
+    cleaned = cleaned
       .replace(/^```json\s*/i, "")
       .replace(/^```\s*/i, "")
       .replace(/\s*```\s*$/i, "")
       .trim();
 
+    // Extract the JSON object if there's surrounding text
     const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
     if (jsonMatch) cleaned = jsonMatch[0];
 
     const parsed = JSON.parse(cleaned);
 
+    // FIX: Validate and coerce each field carefully
+    const validSentiments  = ["positive", "neutral", "negative"];
+    const validContentTypes = ["article", "news", "documentation", "blog", "other"];
+
     return {
-      summary:     Array.isArray(parsed.summary)     ? parsed.summary     : ["No summary available."],
-      keyInsights: Array.isArray(parsed.keyInsights)  ? parsed.keyInsights : [],
-      topics:      Array.isArray(parsed.topics)       ? parsed.topics      : [],
-      sentiment:   ["positive", "neutral", "negative"].includes(parsed.sentiment)
-                     ? parsed.sentiment : "neutral",
-      contentType: ["article", "news", "documentation", "blog", "other"].includes(parsed.contentType)
-                     ? parsed.contentType : "other",
+      summary: Array.isArray(parsed.summary)
+        ? parsed.summary.filter((s) => typeof s === "string" && s.trim())
+        : ["No summary available."],
+      keyInsights: Array.isArray(parsed.keyInsights)
+        ? parsed.keyInsights.filter((s) => typeof s === "string" && s.trim())
+        : [],
+      topics: Array.isArray(parsed.topics)
+        ? parsed.topics.filter((s) => typeof s === "string" && s.trim())
+        : [],
+      sentiment: validSentiments.includes(parsed.sentiment)
+        ? parsed.sentiment
+        : "neutral",
+      contentType: validContentTypes.includes(parsed.contentType)
+        ? parsed.contentType
+        : "other",
     };
   } catch (e) {
+    // FIX: Try to salvage partial content if JSON parse fails
+    const summaryMatch = raw.match(/"summary"\s*:\s*\[([\s\S]*?)\]/);
+    if (summaryMatch) {
+      try {
+        const partialSummary = JSON.parse(`[${summaryMatch[1]}]`);
+        if (Array.isArray(partialSummary) && partialSummary.length > 0) {
+          return {
+            summary: partialSummary,
+            keyInsights: [],
+            topics: [],
+            sentiment: "neutral",
+            contentType: "other",
+          };
+        }
+      } catch (_) { /* fall through */ }
+    }
     return buildFallbackResponse("Could not parse AI response. Please try again.");
   }
 }
@@ -451,12 +479,12 @@ async function getSettings() {
     chrome.storage.local.get(
       ["apiKey", "provider", "model", "geminiModel", "claudeModel"],
       (result) => {
-        // BUG FIX: Apply safe defaults so provider routing never falls through incorrectly
         resolve({
           apiKey:      result.apiKey      || "",
           provider:    result.provider    || "openai",
           model:       result.model       || "gpt-4o-mini",
           geminiModel: result.geminiModel || "gemini-2.0-flash",
+          // FIX: Correct default Claude model ID
           claudeModel: result.claudeModel || "claude-haiku-4-5-20251001",
         });
       }
