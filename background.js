@@ -1,13 +1,11 @@
-// background.js — Service Worker
-// All AI calls go through YOUR backend on Render. No API keys required.
+// background.js — Service Worker v5
+// All AI calls route through the PageMind Render backend.
+// No API keys stored or used in the extension.
 
-const CACHE_TTL_MS  = 30 * 60 * 1000; // 30 minutes
-const FETCH_TIMEOUT = 90_000;          // 90s — Gemini automation can be slow
-const MAX_RETRIES   = 2;
-
-// ── IMPORTANT: Set this to your Render backend URL after deploying ────────────
-// Example: "https://pagemind-backend.onrender.com"
-const BACKEND_URL = "https://pagemind-backend.onrender.com";
+const CACHE_TTL_MS    = 30 * 60 * 1000; // 30 minutes
+const FETCH_TIMEOUT   = 90_000;          // 90s — backend may be cold-starting on Render free tier
+const MAX_RETRIES     = 2;
+const DEFAULT_BACKEND = "https://pagemind-backend.onrender.com";
 
 // ── Message router ────────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -27,8 +25,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "GET_BACKEND_URL") {
     getBackendUrl()
-      .then(url => sendResponse({ url }))
-      .catch(() => sendResponse({ url: BACKEND_URL }));
+      .then((url) => sendResponse({ url }))
+      .catch(() => sendResponse({ url: DEFAULT_BACKEND }));
+    return true;
+  }
+
+  if (message.type === "PING_BACKEND") {
+    pingBackend()
+      .then((ok) => sendResponse({ ok }))
+      .catch(() => sendResponse({ ok: false }));
     return true;
   }
 });
@@ -42,43 +47,42 @@ async function handleSummarize({ url, title, content, mode }) {
   const backendUrl = await getBackendUrl();
   const result     = await callBackend(backendUrl, { title, content, mode });
 
-  const readingTime = estimateReadingTime(content);
-  const response    = { ...result, readingTime, fromCache: false };
-
-  await setCached(cacheKey, response);
-  return response;
+  await setCached(cacheKey, result);
+  return { ...result, fromCache: false };
 }
 
-// ── Call your Render backend ──────────────────────────────────────────────────
+// ── Call the Render backend ───────────────────────────────────────────────────
 async function callBackend(backendUrl, { title, content, mode }) {
-  // Truncate content before sending — keeps request size small
+  // Trim content before sending — reduces request size
   const truncated = content.slice(0, 5000);
-
   let lastError;
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    if (attempt > 0) await sleep(2000);
+    if (attempt > 0) await sleep(2500);
 
     const controller = new AbortController();
     const timer      = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
 
     try {
       const res = await fetch(`${backendUrl}/summarize`, {
-        method: "POST",
+        method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, content: truncated, mode }),
-        signal: controller.signal,
+        body:    JSON.stringify({ title, content: truncated, mode }),
+        signal:  controller.signal,
       });
       clearTimeout(timer);
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
 
       if (!res.ok) {
-        // Use the error code from backend if available
         const code = data?.error || `HTTP_${res.status}`;
-        if (res.status === 429) throw new Error("RATE_LIMITED");
-        if (res.status === 504) throw new Error("TIMEOUT");
-        if (res.status === 503) throw new Error("NETWORK_ERROR");
+        if (res.status === 429)                     throw new Error("RATE_LIMITED");
+        if (res.status === 504)                     throw new Error("TIMEOUT");
+        if (res.status === 400)                     throw new Error(data?.error || "INVALID_INPUT");
+        if (res.status >= 500 && attempt < MAX_RETRIES - 1) {
+          lastError = new Error(code);
+          continue;
+        }
         throw new Error(code);
       }
 
@@ -90,37 +94,51 @@ async function callBackend(backendUrl, { title, content, mode }) {
 
     } catch (err) {
       clearTimeout(timer);
+
       if (err.name === "AbortError") {
         lastError = new Error("TIMEOUT");
-      } else if (err.message === "Failed to fetch" || err.message.includes("fetch")) {
+      } else if (
+        err.message === "Failed to fetch" ||
+        err.message.includes("fetch") ||
+        err.message.includes("NetworkError")
+      ) {
         lastError = new Error("BACKEND_UNREACHABLE");
       } else {
         lastError = err;
       }
 
-      // Don't retry on these
-      if (["RATE_LIMITED", "INVALID_INPUT"].includes(lastError.message)) break;
+      // Non-retriable errors
+      if (["RATE_LIMITED", "INVALID_INPUT", "TOO_SHORT"].includes(lastError.message)) break;
     }
   }
 
   throw lastError || new Error("SERVER_ERROR");
 }
 
-// ── Backend URL (can be overridden via storage) ───────────────────────────────
+// ── Ping backend (used by settings page to test connection) ───────────────────
+async function pingBackend() {
+  const backendUrl = await getBackendUrl();
+  try {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 10_000);
+    const res = await fetch(`${backendUrl}/health`, { signal: controller.signal });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ── Backend URL (stored in chrome.storage.local, falls back to default) ───────
 async function getBackendUrl() {
   return new Promise((resolve) => {
     chrome.storage.local.get(["backendUrl"], (result) => {
-      resolve(result.backendUrl || BACKEND_URL);
+      const url = (result.backendUrl || DEFAULT_BACKEND).replace(/\/$/, "");
+      resolve(url);
     });
   });
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function estimateReadingTime(text) {
-  const words = text.trim().split(/\s+/).filter(Boolean).length;
-  return Math.max(1, Math.ceil(words / 238));
-}
-
 function hashUrl(url) {
   let hash = 0;
   for (let i = 0; i < url.length; i++) {
@@ -130,7 +148,7 @@ function hashUrl(url) {
   return Math.abs(hash).toString(36);
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ── Cache helpers ─────────────────────────────────────────────────────────────
 async function getCached(key) {
@@ -153,17 +171,17 @@ async function setCached(key, data) {
 async function clearCache(url) {
   return new Promise((resolve) => {
     if (url) {
-      const key = `cache_${hashUrl(url)}`;
+      const prefix = `cache_${hashUrl(url)}`;
       chrome.storage.local.get(null, (all) => {
-        const keysToRemove = Object.keys(all).filter((k) => k.startsWith(key));
-        if (keysToRemove.length === 0) return resolve();
-        chrome.storage.local.remove(keysToRemove, resolve);
+        const keys = Object.keys(all).filter((k) => k.startsWith(prefix));
+        if (!keys.length) return resolve();
+        chrome.storage.local.remove(keys, resolve);
       });
     } else {
       chrome.storage.local.get(null, (all) => {
-        const keysToRemove = Object.keys(all).filter((k) => k.startsWith("cache_"));
-        if (keysToRemove.length === 0) return resolve();
-        chrome.storage.local.remove(keysToRemove, resolve);
+        const keys = Object.keys(all).filter((k) => k.startsWith("cache_"));
+        if (!keys.length) return resolve();
+        chrome.storage.local.remove(keys, resolve);
       });
     }
   });
