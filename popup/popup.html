@@ -40,12 +40,6 @@
     <div class="page-url" id="pageUrl"></div>
   </div>
 
-  <!-- ── No API key warning ── -->
-  <div class="alert alert--warn" id="noKeyAlert" hidden>
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-    No API key found. <button class="link-btn" id="goToSettings">Set up now →</button>
-  </div>
-
   <!-- ── Error banner ── -->
   <div class="alert alert--error" id="errorAlert" hidden>
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
@@ -87,12 +81,12 @@
       </svg>
     </div>
     <p class="loading-text" id="loadingText">Extracting content…</p>
+    <p class="loading-sub">Powered by Gemini · No API key needed</p>
   </div>
 
   <!-- ── Results ── -->
   <div class="results" id="results" hidden>
 
-    <!-- Stats bar -->
     <div class="stats-bar">
       <div class="stat">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
@@ -111,7 +105,6 @@
       </div>
     </div>
 
-    <!-- Summary -->
     <div class="result-section">
       <div class="section-header">
         <h3 class="section-title">Summary</h3>
@@ -122,13 +115,11 @@
       <ul class="bullet-list" id="summaryList"></ul>
     </div>
 
-    <!-- Key Insights -->
     <div class="result-section">
       <h3 class="section-title">Key Insights</h3>
       <ul class="insight-list" id="insightList"></ul>
     </div>
 
-    <!-- Topics -->
     <div class="result-section">
       <div class="section-header">
         <h3 class="section-title">Topics</h3>
@@ -148,9 +139,9 @@
       <polyline points="14 2 14 8 20 8"/>
       <line x1="16" y1="13" x2="8" y2="13"/>
       <line x1="16" y1="17" x2="8" y2="17"/>
-      <polyline points="10 9 9 9 8 9"/>
     </svg>
     <p>Click <strong>Summarize</strong> to analyse this page</p>
+    <p class="no-key-note">✦ No API key required</p>
   </div>
 
   <script src="popup.js"></script>

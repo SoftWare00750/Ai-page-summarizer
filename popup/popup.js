@@ -1,13 +1,10 @@
-// popup.js — Popup controller
+// popup.js — Popup controller (no API keys needed!)
 
 (() => {
-  // ── DOM refs ───────────────────────────────────────────────────────────────
   const $ = (id) => document.getElementById(id);
   const el = {
     pageTitle:      $("pageTitle"),
     pageUrl:        $("pageUrl"),
-    noKeyAlert:     $("noKeyAlert"),
-    goToSettings:   $("goToSettings"),
     errorAlert:     $("errorAlert"),
     errorMsg:       $("errorMsg"),
     settingsBtn:    $("settingsBtn"),
@@ -30,7 +27,6 @@
     modeTabs:       document.querySelectorAll(".mode-tab"),
   };
 
-  // ── State ──────────────────────────────────────────────────────────────────
   let state = {
     mode:             "default",
     activeTab:        null,
@@ -48,7 +44,7 @@
 
   function isRestrictedUrl(url) {
     if (!url) return true;
-    return RESTRICTED_PREFIXES.some((prefix) => url.startsWith(prefix));
+    return RESTRICTED_PREFIXES.some(p => url.startsWith(p));
   }
 
   // ── Init ───────────────────────────────────────────────────────────────────
@@ -60,31 +56,21 @@
     setPageMeta(state.activeTab.title, state.currentUrl);
 
     if (isRestrictedUrl(state.currentUrl)) {
-      showError("PageMind cannot run on browser internal pages. Please navigate to a regular webpage.");
+      showError("PageMind cannot run on browser internal pages. Navigate to a regular webpage.");
       el.summarizeBtn.disabled = true;
-      return;
-    }
-
-    const settings = await sendToBackground({ type: "GET_SETTINGS" });
-    if (!settings?.apiKey) {
-      el.noKeyAlert.hidden = false;
     }
   }
 
   // ── Event listeners ────────────────────────────────────────────────────────
   el.summarizeBtn.addEventListener("click", handleSummarize);
   el.clearBtn.addEventListener("click", handleClear);
-  el.settingsBtn.addEventListener("click", openSettings);
-  el.goToSettings.addEventListener("click", openSettings);
+  el.settingsBtn.addEventListener("click", () => chrome.runtime.openOptionsPage());
   el.copySummary.addEventListener("click", handleCopy);
   el.highlightBtn.addEventListener("click", handleHighlightToggle);
 
   el.modeTabs.forEach((tab) => {
     tab.addEventListener("click", () => {
-      el.modeTabs.forEach((t) => {
-        t.classList.remove("active");
-        t.setAttribute("aria-selected", "false");
-      });
+      el.modeTabs.forEach(t => { t.classList.remove("active"); t.setAttribute("aria-selected", "false"); });
       tab.classList.add("active");
       tab.setAttribute("aria-selected", "true");
       state.mode = tab.dataset.mode;
@@ -94,40 +80,25 @@
   // ── Summarize ──────────────────────────────────────────────────────────────
   async function handleSummarize() {
     clearError();
-    el.noKeyAlert.hidden = true;
-
     setLoading(true, "Extracting content…");
     el.emptyState.hidden = true;
     el.results.hidden    = true;
     el.clearBtn.hidden   = true;
 
     try {
-      // BUG FIX: ensureContentScript now returns the extracted content if available,
-      // so we don't make a redundant second message. Also uses longer timeout.
       const extracted = await ensureContentScriptAndExtract(state.activeTab.id);
 
       if (!extracted) {
-        throw new Error(
-          "Could not connect to this page. Try refreshing the page (Ctrl+R) and summarizing again."
-        );
+        throw new Error("Could not connect to this page. Try refreshing (Ctrl+R) and summarizing again.");
       }
-
-      // BUG FIX: check for error object returned from content script
       if (extracted.error) {
-        throw new Error(
-          "Failed to extract page content: " + extracted.error +
-          ". Try refreshing the page and summarizing again."
-        );
+        throw new Error("Failed to extract page content. Try refreshing and summarizing again.");
       }
-
       if (!extracted.text || extracted.text.length < 80) {
-        throw new Error(
-          "Not enough readable text found on this page. " +
-          "Try a different page or wait for the page to fully load."
-        );
+        throw new Error("Not enough readable text found on this page. Try a different page or wait for it to fully load.");
       }
 
-      setLoadingText("Summarizing with AI…");
+      setLoadingText("Sending to AI… (this may take 15–30 seconds)");
 
       const result = await sendToBackground({
         type: "SUMMARIZE",
@@ -139,13 +110,8 @@
         },
       });
 
-      if (result?.error) {
-        throw new Error(friendlyError(result.error));
-      }
-
-      if (!result || !result.summary) {
-        throw new Error("Received an unexpected response from AI. Please try again.");
-      }
+      if (result?.error) throw new Error(friendlyError(result.error));
+      if (!result || !result.summary) throw new Error("Received an unexpected response. Please try again.");
 
       renderResults(result);
 
@@ -157,27 +123,21 @@
     }
   }
 
-  // ── BUG FIX: Combined inject + extract to avoid double message and timing issues ──
   async function ensureContentScriptAndExtract(tabId) {
-    // First attempt: content script may already be injected
-    const firstAttempt = await sendToTab(tabId, { type: "EXTRACT_CONTENT" });
-    if (firstAttempt !== null) return firstAttempt;
+    const first = await sendToTab(tabId, { type: "EXTRACT_CONTENT" });
+    if (first !== null) return first;
 
-    // Content script not responding — inject it
     try {
       await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
-    } catch (e) {
-      // Injection failed (restricted page or permission issue)
+    } catch {
       return null;
     }
 
-    // BUG FIX: Wait longer and retry up to 3 times to handle slow page loads
     for (let i = 0; i < 3; i++) {
       await sleep(300);
       const attempt = await sendToTab(tabId, { type: "EXTRACT_CONTENT" });
       if (attempt !== null) return attempt;
     }
-
     return null;
   }
 
@@ -186,8 +146,8 @@
     el.readingTime.textContent = data.readingTime ?? "—";
     el.contentType.textContent = data.contentType ?? "—";
 
-    const sentiment              = data.sentiment || "neutral";
-    el.sentimentBadge.className  = `stat sentiment-badge ${sentiment}`;
+    const sentiment             = data.sentiment || "neutral";
+    el.sentimentBadge.className = `stat sentiment-badge ${sentiment}`;
     el.sentimentText.textContent = sentiment;
     el.cacheBadge.hidden         = !data.fromCache;
 
@@ -214,8 +174,7 @@
       el.topicsList.appendChild(chip);
     });
 
-    state.lastSummaryText = (data.summary || []).map((b) => `• ${b}`).join("\n");
-
+    state.lastSummaryText  = (data.summary || []).map(b => `• ${b}`).join("\n");
     el.results.hidden      = false;
     el.clearBtn.hidden     = false;
     el.emptyState.hidden   = true;
@@ -230,38 +189,29 @@
       state.highlightsActive = false;
     }
     await sendToBackground({ type: "CLEAR_CACHE", payload: { url: state.currentUrl } });
-
     el.results.hidden    = true;
     el.clearBtn.hidden   = true;
     el.emptyState.hidden = false;
     clearError();
   }
 
-  // ── Copy summary ───────────────────────────────────────────────────────────
   async function handleCopy() {
     if (!state.lastSummaryText) return;
     try {
       await navigator.clipboard.writeText(state.lastSummaryText);
       el.copySummary.classList.add("copied");
       setTimeout(() => el.copySummary.classList.remove("copied"), 1800);
-    } catch {
-      // Clipboard API may be unavailable
-    }
+    } catch {}
   }
 
-  // ── Highlight toggle ───────────────────────────────────────────────────────
   async function handleHighlightToggle() {
     if (!state.currentTopics.length) return;
-
     if (state.highlightsActive) {
       await sendToTab(state.activeTab.id, { type: "CLEAR_HIGHLIGHTS" });
       state.highlightsActive = false;
       el.highlightBtn.classList.remove("active");
     } else {
-      await sendToTab(state.activeTab.id, {
-        type:    "HIGHLIGHT_TOPICS",
-        payload: { topics: state.currentTopics },
-      });
+      await sendToTab(state.activeTab.id, { type: "HIGHLIGHT_TOPICS", payload: { topics: state.currentTopics } });
       state.highlightsActive = true;
       el.highlightBtn.classList.add("active");
     }
@@ -281,40 +231,19 @@
   function setLoading(on, text) {
     el.loadingState.hidden   = !on;
     el.summarizeBtn.disabled = on;
-    if (text) setLoadingText(text);
+    if (text) el.loadingText.textContent = text;
   }
 
-  function setLoadingText(text) {
-    el.loadingText.textContent = text;
-  }
+  function setLoadingText(text) { el.loadingText.textContent = text; }
+  function showError(msg)  { el.errorAlert.hidden = false; el.errorMsg.textContent = msg; }
+  function clearError()    { el.errorAlert.hidden = true; el.errorMsg.textContent = ""; }
+  function sleep(ms)       { return new Promise(r => setTimeout(r, ms)); }
 
-  function showError(msg) {
-    el.errorAlert.hidden    = false;
-    el.errorMsg.textContent = msg;
-  }
-
-  function clearError() {
-    el.errorAlert.hidden    = true;
-    el.errorMsg.textContent = "";
-  }
-
-  function openSettings() {
-    chrome.runtime.openOptionsPage();
-  }
-
-  function sleep(ms) {
-    return new Promise((r) => setTimeout(r, ms));
-  }
-
-  // ── Messaging helpers ──────────────────────────────────────────────────────
   function sendToBackground(message) {
     return new Promise((resolve) => {
       chrome.runtime.sendMessage(message, (response) => {
-        if (chrome.runtime.lastError) {
-          resolve({ error: chrome.runtime.lastError.message });
-        } else {
-          resolve(response);
-        }
+        if (chrome.runtime.lastError) resolve({ error: chrome.runtime.lastError.message });
+        else resolve(response);
       });
     });
   }
@@ -322,60 +251,33 @@
   function sendToTab(tabId, message) {
     return new Promise((resolve) => {
       chrome.tabs.sendMessage(tabId, message, (response) => {
-        if (chrome.runtime.lastError) {
-          resolve(null);
-        } else {
-          resolve(response);
-        }
+        if (chrome.runtime.lastError) resolve(null);
+        else resolve(response);
       });
     });
   }
 
   async function getActiveTab() {
     return new Promise((resolve) => {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        resolve(tabs?.[0] || null);
-      });
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => resolve(tabs?.[0] || null));
     });
   }
 
-  // ── Security: sanitise text before inserting into DOM ─────────────────────
-  function sanitize(str) {
-    return String(str ?? "").slice(0, 800);
-  }
+  function sanitize(str) { return String(str ?? "").slice(0, 800); }
 
-  // ── Friendly error messages ────────────────────────────────────────────────
   function friendlyError(code) {
     if (!code) return "Something went wrong. Please try again.";
-
     const map = {
-      NO_API_KEY:      "No API key set. Click the settings icon (⚙) to add one.",
-      INVALID_API_KEY: "Invalid API key. Please check your key in Settings.",
-      RATE_LIMITED:    "Rate limit reached. Please wait a moment and try again.",
-      QUOTA_EXCEEDED:  "Gemini API quota exhausted for today. Try again tomorrow, switch to a different model (Gemini 2.0 Flash is recommended), or upgrade to a paid plan.",
-      NETWORK_ERROR:   "Network error — check your internet connection and try again.",
-      REQUEST_TIMEOUT: "The request timed out (45s). Check your connection and try again.",
-      EMPTY_RESPONSE:  "The AI returned an empty response. Try a different page or mode.",
-      SERVER_ERROR:    "The AI service is temporarily unavailable. Please try again shortly.",
+      RATE_LIMITED:        "Too many requests. Please wait a moment and try again.",
+      TIMEOUT:             "Gemini took too long to respond (90s). Please try again.",
+      NETWORK_ERROR:       "Network error — check your internet connection.",
+      BACKEND_UNREACHABLE: "Cannot reach the PageMind backend. Make sure it is deployed on Render and the URL is set correctly in Settings.",
+      SERVER_ERROR:        "Server error. Please try again shortly.",
+      EMPTY_RESPONSE:      "AI returned an empty response. Try a different page or mode.",
+      TOO_SHORT:           "Not enough text on this page to summarize.",
     };
-
-    if (code.startsWith("MODEL_NOT_FOUND:")) {
-      const model = code.split(":")[1]?.trim();
-      return `Model "${model}" not found or not available on your plan. Please select a different model in Settings.`;
-    }
-
-    if (code.startsWith("GEMINI_ERROR:")) {
-      const detail = code.split(":").slice(1).join(":").trim();
-      return `Gemini API error: ${detail}. Please check your API key and model selection in Settings.`;
-    }
-
-    if (code.startsWith("BLOCKED:")) {
-      return "This page's content was blocked by the AI's safety filters.";
-    }
-
     return map[code] || code;
   }
 
-  // ── Start ──────────────────────────────────────────────────────────────────
   init();
 })();
