@@ -49,7 +49,6 @@ async function handleSummarize({ url, title, content, mode }) {
     const geminiModel = settings.geminiModel || "gemini-2.0-flash";
     result = await callGemini(settings.apiKey, geminiModel, prompt);
   } else if (provider === "claude") {
-    // FIX: Use correct model IDs matching what settings.html actually stores
     const claudeModel = settings.claudeModel || "claude-haiku-4-5-20251001";
     result = await callClaude(settings.apiKey, claudeModel, prompt);
   } else {
@@ -103,7 +102,6 @@ async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
       } else {
         lastError = new Error("NETWORK_ERROR");
       }
-      // Don't retry on timeout for last attempt
       if (attempt === retries - 1) break;
     }
   }
@@ -113,7 +111,6 @@ async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
 
 // ── OpenAI API call ───────────────────────────────────────────────────────────
 async function callOpenAI(apiKey, model, prompt) {
-  // FIX: Try modern max_completion_tokens first, fall back to legacy max_tokens
   const body = {
     model,
     messages: [
@@ -124,7 +121,7 @@ async function callOpenAI(apiKey, model, prompt) {
       { role: "user", content: prompt },
     ],
     temperature: 0.3,
-    max_tokens: 1200, // Use max_tokens (works for all models including legacy)
+    max_tokens: 1200,
   };
 
   const res = await fetchWithRetry("https://api.openai.com/v1/chat/completions", {
@@ -193,7 +190,6 @@ async function callGemini(apiKey, model, prompt) {
       if (errMsg.toLowerCase().includes("api key") || errMsg.toLowerCase().includes("api_key")) {
         throw new Error("INVALID_API_KEY");
       }
-      // FIX: Fall back to legacy call (without responseMimeType) for unsupported models
       return callGeminiLegacy(apiKey, model, prompt);
     }
 
@@ -274,7 +270,6 @@ function extractGeminiText(data) {
   if (finishReason === "SAFETY")     throw new Error("BLOCKED: SAFETY");
   if (finishReason === "RECITATION") throw new Error("BLOCKED: RECITATION");
 
-  // FIX: Handle both plain text and JSON mime type responses
   const part = candidate?.content?.parts?.[0];
   if (!part) throw new Error("EMPTY_RESPONSE");
 
@@ -285,14 +280,12 @@ function extractGeminiText(data) {
 
 // ── Anthropic (Claude) API call ───────────────────────────────────────────────
 async function callClaude(apiKey, model, prompt) {
-  // FIX: Correct Anthropic API endpoint and headers
   const res = await fetchWithRetry("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "x-api-key": apiKey,
       "anthropic-version": "2023-06-01",
-      // FIX: Remove anthropic-beta header that was causing issues; not needed for basic messages
     },
     body: JSON.stringify({
       model,
@@ -314,7 +307,6 @@ async function callClaude(apiKey, model, prompt) {
       throw new Error("RATE_LIMITED");
     }
     if (res.status === 400 && errType === "invalid_request_error") {
-      // FIX: Model might be invalid — surface the actual message
       throw new Error(`CLAUDE_ERROR: ${msg}`);
     }
     if (res.status >= 500 || errType === "api_error" || errType === "overloaded_error") {
@@ -325,12 +317,10 @@ async function callClaude(apiKey, model, prompt) {
 
   const data = await res.json();
 
-  // FIX: Claude API returns content as array of blocks; correctly extract text
   if (!data?.content || !Array.isArray(data.content) || data.content.length === 0) {
     throw new Error("EMPTY_RESPONSE");
   }
 
-  // Find the first text block
   const textBlock = data.content.find((block) => block.type === "text");
   if (!textBlock || !textBlock.text) {
     throw new Error("EMPTY_RESPONSE");
@@ -341,7 +331,6 @@ async function callClaude(apiKey, model, prompt) {
 
 // ── Prompt builder ────────────────────────────────────────────────────────────
 function buildPrompt(title, content, mode) {
-  // FIX: Better truncation — don't cut in the middle of a word
   let truncated = content.slice(0, 6000);
   if (content.length > 6000) {
     const lastPeriod = truncated.lastIndexOf('. ');
@@ -356,7 +345,6 @@ function buildPrompt(title, content, mode) {
     detailed: `Provide a thorough summary in 7–10 bullet points, identify 5 key insights, and list up to 8 important topics.`,
   };
 
-  // FIX: Cleaner prompt with explicit schema example to reduce parse failures
   return `${instructions[modeKey]}
 
 Page Title: ${title || "Untitled"}
@@ -388,23 +376,19 @@ function parseAIResponse(raw) {
   }
 
   try {
-    // FIX: More robust cleaning — handle various markdown fence formats
     let cleaned = raw.trim();
 
-    // Strip markdown code fences (```json ... ``` or ``` ... ```)
     cleaned = cleaned
       .replace(/^```json\s*/i, "")
       .replace(/^```\s*/i, "")
       .replace(/\s*```\s*$/i, "")
       .trim();
 
-    // Extract the JSON object if there's surrounding text
     const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
     if (jsonMatch) cleaned = jsonMatch[0];
 
     const parsed = JSON.parse(cleaned);
 
-    // FIX: Validate and coerce each field carefully
     const validSentiments  = ["positive", "neutral", "negative"];
     const validContentTypes = ["article", "news", "documentation", "blog", "other"];
 
@@ -426,7 +410,6 @@ function parseAIResponse(raw) {
         : "other",
     };
   } catch (e) {
-    // FIX: Try to salvage partial content if JSON parse fails
     const summaryMatch = raw.match(/"summary"\s*:\s*\[([\s\S]*?)\]/);
     if (summaryMatch) {
       try {
@@ -484,7 +467,6 @@ async function getSettings() {
           provider:    result.provider    || "openai",
           model:       result.model       || "gpt-4o-mini",
           geminiModel: result.geminiModel || "gemini-2.0-flash",
-          // FIX: Correct default Claude model ID
           claudeModel: result.claudeModel || "claude-haiku-4-5-20251001",
         });
       }
