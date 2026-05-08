@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "PageMind — AI Page Summarizer",
-  "version": "2.0.0",
-  "description": "Instantly summarize any webpage with AI. No API keys required.",
+  "version": "5.0.0",
+  "description": "Instantly summarize any webpage with AI. No API keys required — powered by your own backend.",
 
   "permissions": [
     "activeTab",
