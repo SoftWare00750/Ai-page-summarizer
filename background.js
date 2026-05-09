@@ -40,18 +40,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // ── Main summarize handler ────────────────────────────────────────────────────
 async function handleSummarize({ url, title, content, mode }) {
+  console.log("[PageMind] handleSummarize called", { url, mode, contentLength: content?.length });
+
   const cacheKey = `cache_${hashUrl(url)}_${mode || "default"}`;
   const cached   = await getCached(cacheKey);
-  if (cached) return { ...cached, fromCache: true };
+  if (cached) {
+    console.log("[PageMind] returning cached result");
+    return { ...cached, fromCache: true };
+  }
 
   const settings = await getSettings();
+  console.log("[PageMind] settings loaded", {
+    provider:    settings.provider,
+    hasApiKey:   !!settings.apiKey,
+    keyPrefix:   settings.apiKey?.slice(0, 8) || "(none)",
+    model:       settings.model,
+    geminiModel: settings.geminiModel,
+    claudeModel: settings.claudeModel,
+    aiMode:      settings.aiMode,
+  });
+
   let result;
 
   if (settings.apiKey && settings.provider) {
-    // Call AI provider directly with stored key
+    console.log("[PageMind] using Direct API path");
     result = await callAIDirect(settings, { title, content, mode });
   } else {
-    // Fall back to Render backend (no key needed)
+    console.log("[PageMind] no API key found — falling back to backend");
     const backendUrl = (settings.backendUrl || DEFAULT_BACKEND).replace(/\/$/, "");
     result = await callBackend(backendUrl, { title, content, mode });
   }
@@ -64,7 +79,7 @@ async function handleSummarize({ url, title, content, mode }) {
 async function getSettings() {
   return new Promise((resolve) => {
     chrome.storage.local.get(
-      ["apiKey", "provider", "model", "geminiModel", "claudeModel", "backendUrl"],
+      ["apiKey", "provider", "model", "geminiModel", "claudeModel", "backendUrl", "aiMode"],
       resolve
     );
   });
@@ -75,6 +90,15 @@ async function callAIDirect(settings, { title, content, mode }) {
   const { provider, apiKey, model, geminiModel, claudeModel } = settings;
   const truncated = content.slice(0, 5000);
   const prompt    = buildPrompt(title, truncated, mode);
+
+  console.log("[PageMind] callAIDirect", {
+    provider,
+    model:      provider === "openai" ? (model        || "gpt-4o-mini")              :
+                provider === "gemini" ? (geminiModel   || "gemini-2.0-flash")         :
+                provider === "claude" ? (claudeModel   || "claude-haiku-4-5-20251001") : "unknown",
+    keyPrefix:       apiKey?.slice(0, 8),
+    truncatedLength: truncated.length,
+  });
 
   switch (provider) {
     case "openai":
@@ -90,6 +114,7 @@ async function callAIDirect(settings, { title, content, mode }) {
 
 // ── OpenAI ────────────────────────────────────────────────────────────────────
 async function callOpenAI(apiKey, model, prompt, content) {
+  console.log("[PageMind] callOpenAI start", { model, keyPrefix: apiKey?.slice(0, 8) });
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
 
@@ -110,8 +135,11 @@ async function callOpenAI(apiKey, model, prompt, content) {
     });
     clearTimeout(timer);
 
+    console.log("[PageMind] OpenAI response status", res.status);
+
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
+      console.error("[PageMind] OpenAI error", res.status, err);
       if (res.status === 401) throw new Error("INVALID_API_KEY");
       if (res.status === 429) throw new Error("RATE_LIMITED");
       throw new Error(err?.error?.message || `HTTP_${res.status}`);
@@ -119,6 +147,7 @@ async function callOpenAI(apiKey, model, prompt, content) {
 
     const data = await res.json();
     const text = data?.choices?.[0]?.message?.content || "";
+    console.log("[PageMind] OpenAI success, response length", text.length);
     return parseAIResponse(text, content);
   } finally {
     clearTimeout(timer);
@@ -127,11 +156,14 @@ async function callOpenAI(apiKey, model, prompt, content) {
 
 // ── Google Gemini ─────────────────────────────────────────────────────────────
 async function callGemini(apiKey, model, prompt, content) {
+  console.log("[PageMind] callGemini start", { model, keyPrefix: apiKey?.slice(0, 8) });
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
 
   try {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    console.log("[PageMind] Gemini request URL (key redacted):", url.replace(apiKey, "***"));
+
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -143,8 +175,11 @@ async function callGemini(apiKey, model, prompt, content) {
     });
     clearTimeout(timer);
 
+    console.log("[PageMind] Gemini response status", res.status);
+
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
+      console.error("[PageMind] Gemini error body", res.status, JSON.stringify(err));
       if (res.status === 400 || res.status === 403) throw new Error("INVALID_API_KEY");
       if (res.status === 429) throw new Error("RATE_LIMITED");
       throw new Error(err?.error?.message || `HTTP_${res.status}`);
@@ -152,6 +187,7 @@ async function callGemini(apiKey, model, prompt, content) {
 
     const data = await res.json();
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    console.log("[PageMind] Gemini success, response length", text.length);
     return parseAIResponse(text, content);
   } finally {
     clearTimeout(timer);
@@ -160,6 +196,7 @@ async function callGemini(apiKey, model, prompt, content) {
 
 // ── Anthropic Claude ──────────────────────────────────────────────────────────
 async function callClaude(apiKey, model, prompt, content) {
+  console.log("[PageMind] callClaude start", { model, keyPrefix: apiKey?.slice(0, 8) });
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
 
@@ -180,8 +217,11 @@ async function callClaude(apiKey, model, prompt, content) {
     });
     clearTimeout(timer);
 
+    console.log("[PageMind] Claude response status", res.status);
+
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
+      console.error("[PageMind] Claude error", res.status, err);
       if (res.status === 401) throw new Error("INVALID_API_KEY");
       if (res.status === 429) throw new Error("RATE_LIMITED");
       throw new Error(err?.error?.message || `HTTP_${res.status}`);
@@ -189,6 +229,7 @@ async function callClaude(apiKey, model, prompt, content) {
 
     const data = await res.json();
     const text = data?.content?.[0]?.text || "";
+    console.log("[PageMind] Claude success, response length", text.length);
     return parseAIResponse(text, content);
   } finally {
     clearTimeout(timer);
@@ -289,6 +330,8 @@ async function callBackend(backendUrl, { title, content, mode }) {
   const truncated = content.slice(0, 5000);
   let lastError;
 
+  console.log("[PageMind] callBackend", { backendUrl, mode });
+
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     if (attempt > 0) await sleep(2500);
 
@@ -304,6 +347,8 @@ async function callBackend(backendUrl, { title, content, mode }) {
       });
       clearTimeout(timer);
 
+      console.log("[PageMind] backend response status", res.status);
+
       // Safe JSON parsing — backend may return plain text errors
       const text = await res.text().catch(() => "");
       let data = {};
@@ -313,9 +358,10 @@ async function callBackend(backendUrl, { title, content, mode }) {
 
       if (!res.ok) {
         const code = data?.error || `HTTP_${res.status}`;
-        if (res.status === 429)                             throw new Error("RATE_LIMITED");
-        if (res.status === 504)                             throw new Error("TIMEOUT");
-        if (res.status === 400)                             throw new Error(data?.error || "INVALID_INPUT");
+        console.error("[PageMind] backend error", res.status, code);
+        if (res.status === 429)                              throw new Error("RATE_LIMITED");
+        if (res.status === 504)                              throw new Error("TIMEOUT");
+        if (res.status === 400)                              throw new Error(data?.error || "INVALID_INPUT");
         if (res.status >= 500 && attempt < MAX_RETRIES - 1) { lastError = new Error(code); continue; }
         throw new Error(code);
       }
@@ -325,6 +371,7 @@ async function callBackend(backendUrl, { title, content, mode }) {
 
     } catch (err) {
       clearTimeout(timer);
+      console.error("[PageMind] backend fetch error", err.message);
       if (err.name === "AbortError") {
         lastError = new Error("TIMEOUT");
       } else if (err.message === "Failed to fetch" || err.message.includes("NetworkError")) {
