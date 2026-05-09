@@ -78,18 +78,18 @@ async function callAIDirect(settings, { title, content, mode }) {
 
   switch (provider) {
     case "openai":
-      return callOpenAI(apiKey, model || "gpt-4o-mini", prompt);
+      return callOpenAI(apiKey, model || "gpt-4o-mini", prompt, truncated);
     case "gemini":
-      return callGemini(apiKey, geminiModel || "gemini-2.0-flash", prompt);
+      return callGemini(apiKey, geminiModel || "gemini-2.0-flash", prompt, truncated);
     case "claude":
-      return callClaude(apiKey, claudeModel || "claude-haiku-4-5-20251001", prompt);
+      return callClaude(apiKey, claudeModel || "claude-haiku-4-5-20251001", prompt, truncated);
     default:
       throw new Error("UNKNOWN_PROVIDER");
   }
 }
 
 // ── OpenAI ────────────────────────────────────────────────────────────────────
-async function callOpenAI(apiKey, model, prompt) {
+async function callOpenAI(apiKey, model, prompt, content) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
 
@@ -126,7 +126,7 @@ async function callOpenAI(apiKey, model, prompt) {
 }
 
 // ── Google Gemini ─────────────────────────────────────────────────────────────
-async function callGemini(apiKey, model, prompt) {
+async function callGemini(apiKey, model, prompt, content) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
 
@@ -159,7 +159,7 @@ async function callGemini(apiKey, model, prompt) {
 }
 
 // ── Anthropic Claude ──────────────────────────────────────────────────────────
-async function callClaude(apiKey, model, prompt) {
+async function callClaude(apiKey, model, prompt, content) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
 
