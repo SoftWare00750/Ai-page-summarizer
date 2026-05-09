@@ -6,7 +6,7 @@
   <title>PageMind — Settings</title>
   <link rel="stylesheet" href="settings.css" />
 </head>
-<body>
+<body>5
   <div class="page">
 
     <header class="header">
@@ -59,14 +59,34 @@
           <div class="field">
             <label class="label" for="providerSelect">Provider</label>
             <select class="select" id="providerSelect">
+              <option value="groq">Groq (Free tier — Llama / Mixtral)</option>
               <option value="openai">OpenAI (GPT)</option>
               <option value="gemini">Google Gemini</option>
               <option value="claude">Anthropic (Claude)</option>
             </select>
           </div>
 
+          <!-- Groq model -->
+          <div class="field" id="groqModelField">
+            <label class="label" for="groqModelSelect">Model</label>
+            <select class="select" id="groqModelSelect">
+              <optgroup label="Llama 3">
+                <option value="llama-3.3-70b-versatile">Llama 3.3 70B (best quality)</option>
+                <option value="llama-3.1-8b-instant">Llama 3.1 8B (fastest)</option>
+                <option value="llama3-8b-8192">Llama 3 8B</option>
+                <option value="llama3-70b-8192">Llama 3 70B</option>
+              </optgroup>
+              <optgroup label="Mixtral">
+                <option value="mixtral-8x7b-32768">Mixtral 8x7B</option>
+              </optgroup>
+              <optgroup label="Gemma">
+                <option value="gemma2-9b-it">Gemma 2 9B</option>
+              </optgroup>
+            </select>
+          </div>
+
           <!-- OpenAI model -->
-          <div class="field" id="modelField">
+          <div class="field" id="modelField" hidden>
             <label class="label" for="modelSelect">Model</label>
             <select class="select" id="modelSelect">
               <option value="gpt-4o-mini">GPT-4o mini (fast &amp; cheap)</option>
@@ -119,9 +139,9 @@
           <p class="card-desc">Stored in <code>chrome.storage.local</code> — never synced across devices or sent to third parties.</p>
 
           <div class="field">
-            <label class="label" for="apiKeyInput"><span id="keyLabel">OpenAI API Key</span></label>
+            <label class="label" for="apiKeyInput"><span id="keyLabel">Groq API Key</span></label>
             <div class="input-wrap">
-              <input class="input" type="password" id="apiKeyInput" placeholder="sk-…" autocomplete="off" spellcheck="false" />
+              <input class="input" type="password" id="apiKeyInput" placeholder="gsk_…" autocomplete="off" spellcheck="false" />
               <button class="toggle-btn" id="toggleKey" aria-label="Toggle key visibility">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
@@ -129,7 +149,7 @@
               </button>
             </div>
             <p class="hint" id="keyHint">
-              Get your key at <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com/api-keys</a>
+              Get your free key at <a href="https://console.groq.com/keys" target="_blank" rel="noopener">console.groq.com/keys</a>
             </p>
           </div>
         </section>

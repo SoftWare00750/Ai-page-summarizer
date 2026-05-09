@@ -1,4 +1,4 @@
-// settings.js — Settings page controller v2
+// settings.js — Settings page controller v3 (Groq added)
 
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -11,6 +11,8 @@
     geminiModelField:  $("geminiModelField"),
     claudeModelSelect: $("claudeModelSelect"),
     claudeModelField:  $("claudeModelField"),
+    groqModelSelect:   $("groqModelSelect"),
+    groqModelField:    $("groqModelField"),
     apiKeyInput:       $("apiKeyInput"),
     keyLabel:          $("keyLabel"),
     keyHint:           $("keyHint"),
@@ -30,6 +32,12 @@
   let currentMode = "direct"; // "direct" | "backend"
 
   const PROVIDER_META = {
+    groq: {
+      label:       "Groq API Key",
+      placeholder: "gsk_…",
+      hint: `Get your free key at <a href="https://console.groq.com/keys" target="_blank" rel="noopener">console.groq.com/keys</a> — no credit card required`,
+      prefix: "gsk_",
+    },
     openai: {
       label:       "OpenAI API Key",
       placeholder: "sk-…",
@@ -53,20 +61,17 @@
   // ── Load saved settings ───────────────────────────────────────────────────
   function load() {
     chrome.storage.local.get(
-      ["apiKey", "provider", "model", "geminiModel", "claudeModel", "backendUrl", "aiMode"],
+      ["apiKey", "provider", "model", "geminiModel", "claudeModel", "groqModel", "backendUrl", "aiMode"],
       (data) => {
-        // Restore mode
         const mode = data.aiMode || (data.apiKey ? "direct" : "backend");
         setMode(mode, false);
 
-        // Provider + models
-        el.providerSelect.value    = data.provider    || "openai";
+        el.providerSelect.value    = data.provider    || "groq";
         el.modelSelect.value       = data.model       || "gpt-4o-mini";
         el.geminiModelSelect.value = data.geminiModel || "gemini-2.0-flash";
         el.claudeModelSelect.value = data.claudeModel || "claude-haiku-4-5-20251001";
+        el.groqModelSelect.value   = data.groqModel   || "llama-3.3-70b-versatile";
         el.apiKeyInput.value       = data.apiKey      || "";
-
-        // Backend URL
         el.backendUrlInput.value   = data.backendUrl  || "";
 
         updateProviderUI(el.providerSelect.value);
@@ -87,11 +92,12 @@
 
   // ── Update UI based on provider ───────────────────────────────────────────
   function updateProviderUI(provider) {
-    const meta = PROVIDER_META[provider] || PROVIDER_META.openai;
+    const meta = PROVIDER_META[provider] || PROVIDER_META.groq;
     el.keyLabel.textContent    = meta.label;
     el.apiKeyInput.placeholder = meta.placeholder;
     el.keyHint.innerHTML       = meta.hint;
 
+    el.groqModelField.hidden   = provider !== "groq";
     el.modelField.hidden       = provider !== "openai";
     el.geminiModelField.hidden = provider !== "gemini";
     el.claudeModelField.hidden = provider !== "claude";
@@ -103,6 +109,7 @@
     const model       = el.modelSelect.value;
     const geminiModel = el.geminiModelSelect.value;
     const claudeModel = el.claudeModelSelect.value;
+    const groqModel   = el.groqModelSelect.value;
     const backendUrl  = el.backendUrlInput.value.trim();
 
     if (currentMode === "direct") {
@@ -121,7 +128,7 @@
       }
 
       chrome.storage.local.set(
-        { apiKey, provider, model, geminiModel, claudeModel, aiMode: "direct", backendUrl: backendUrl || "" },
+        { apiKey, provider, model, geminiModel, claudeModel, groqModel, aiMode: "direct", backendUrl: backendUrl || "" },
         () => {
           if (chrome.runtime.lastError) {
             showToast("Failed to save settings.", "error");
@@ -131,10 +138,9 @@
         }
       );
     } else {
-      // Backend mode — clear apiKey so background.js falls through to backend
       const url = backendUrl || "https://pagemind-backend.onrender.com";
       chrome.storage.local.set(
-        { apiKey: "", provider, model, geminiModel, claudeModel, aiMode: "backend", backendUrl: url },
+        { apiKey: "", provider, model, geminiModel, claudeModel, groqModel, aiMode: "backend", backendUrl: url },
         () => {
           if (chrome.runtime.lastError) {
             showToast("Failed to save settings.", "error");

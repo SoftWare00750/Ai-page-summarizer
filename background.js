@@ -1,5 +1,5 @@
-// background.js — Service Worker v6
-// Reads API key + provider from chrome.storage.local and calls AI directly.
+// background.js — Service Worker v7
+// Providers: OpenAI, Gemini, Claude, Groq (free tier)
 // Falls back to Render backend if no key is configured.
 
 const CACHE_TTL_MS    = 30 * 60 * 1000;
@@ -57,6 +57,7 @@ async function handleSummarize({ url, title, content, mode }) {
     model:       settings.model,
     geminiModel: settings.geminiModel,
     claudeModel: settings.claudeModel,
+    groqModel:   settings.groqModel,
     aiMode:      settings.aiMode,
   });
 
@@ -79,7 +80,7 @@ async function handleSummarize({ url, title, content, mode }) {
 async function getSettings() {
   return new Promise((resolve) => {
     chrome.storage.local.get(
-      ["apiKey", "provider", "model", "geminiModel", "claudeModel", "backendUrl", "aiMode"],
+      ["apiKey", "provider", "model", "geminiModel", "claudeModel", "groqModel", "backendUrl", "aiMode"],
       resolve
     );
   });
@@ -87,15 +88,16 @@ async function getSettings() {
 
 // ── Call AI provider directly ─────────────────────────────────────────────────
 async function callAIDirect(settings, { title, content, mode }) {
-  const { provider, apiKey, model, geminiModel, claudeModel } = settings;
+  const { provider, apiKey, model, geminiModel, claudeModel, groqModel } = settings;
   const truncated = content.slice(0, 5000);
   const prompt    = buildPrompt(title, truncated, mode);
 
   console.log("[PageMind] callAIDirect", {
     provider,
-    model:      provider === "openai" ? (model        || "gpt-4o-mini")              :
-                provider === "gemini" ? (geminiModel   || "gemini-2.0-flash")         :
-                provider === "claude" ? (claudeModel   || "claude-haiku-4-5-20251001") : "unknown",
+    model:      provider === "openai" ? (model       || "gpt-4o-mini")               :
+                provider === "gemini" ? (geminiModel  || "gemini-2.0-flash")          :
+                provider === "claude" ? (claudeModel  || "claude-haiku-4-5-20251001") :
+                provider === "groq"   ? (groqModel    || "llama-3.3-70b-versatile")   : "unknown",
     keyPrefix:       apiKey?.slice(0, 8),
     truncatedLength: truncated.length,
   });
@@ -107,6 +109,8 @@ async function callAIDirect(settings, { title, content, mode }) {
       return callGemini(apiKey, geminiModel || "gemini-2.0-flash", prompt, truncated);
     case "claude":
       return callClaude(apiKey, claudeModel || "claude-haiku-4-5-20251001", prompt, truncated);
+    case "groq":
+      return callGroq(apiKey, groqModel || "llama-3.3-70b-versatile", prompt, truncated);
     default:
       throw new Error("UNKNOWN_PROVIDER");
   }
@@ -236,6 +240,48 @@ async function callClaude(apiKey, model, prompt, content) {
   }
 }
 
+// ── Groq (OpenAI-compatible, free tier) ───────────────────────────────────────
+async function callGroq(apiKey, model, prompt, content) {
+  console.log("[PageMind] callGroq start", { model, keyPrefix: apiKey?.slice(0, 8) });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+
+  try {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.1,
+        max_tokens: 1024,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+
+    console.log("[PageMind] Groq response status", res.status);
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      console.error("[PageMind] Groq error", res.status, err);
+      if (res.status === 401) throw new Error("INVALID_API_KEY");
+      if (res.status === 429) throw new Error("RATE_LIMITED");
+      throw new Error(err?.error?.message || `HTTP_${res.status}`);
+    }
+
+    const data = await res.json();
+    const text = data?.choices?.[0]?.message?.content || "";
+    console.log("[PageMind] Groq success, response length", text.length);
+    return parseAIResponse(text, content);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ── Prompt builder ────────────────────────────────────────────────────────────
 function buildPrompt(title, content, mode) {
   const modeMap = {
@@ -349,7 +395,6 @@ async function callBackend(backendUrl, { title, content, mode }) {
 
       console.log("[PageMind] backend response status", res.status);
 
-      // Safe JSON parsing — backend may return plain text errors
       const text = await res.text().catch(() => "");
       let data = {};
       try { data = JSON.parse(text); } catch {
