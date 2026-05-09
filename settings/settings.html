@@ -9,7 +9,6 @@
 <body>
   <div class="page">
 
-    <!-- Header -->
     <header class="header">
       <div class="header-brand">
         <div class="logo">
@@ -33,113 +32,132 @@
 
     <main class="main">
 
-      <!-- Toast -->
       <div class="toast" id="toast" hidden></div>
 
-      <!-- Provider -->
+      <!-- Mode selector -->
       <section class="card">
-        <h2 class="card-title">AI Provider</h2>
-        <p class="card-desc">Choose which AI service to use for summaries.</p>
-
-        <div class="field">
-          <label class="label" for="providerSelect">Provider</label>
-          <select class="select" id="providerSelect">
-            <option value="openai">OpenAI (GPT)</option>
-            <option value="gemini">Google Gemini</option>
-            <option value="claude">Anthropic (Claude)</option>
-          </select>
-        </div>
-
-        <!-- OpenAI model selector -->
-        <div class="field" id="modelField">
-          <label class="label" for="modelSelect">Model</label>
-          <select class="select" id="modelSelect">
-            <option value="gpt-4o-mini">GPT-4o mini (fast &amp; cheap)</option>
-            <option value="gpt-4o">GPT-4o (best quality)</option>
-            <option value="gpt-3.5-turbo">GPT-3.5 Turbo (legacy)</option>
-          </select>
-        </div>
-
-        <!-- Gemini model selector -->
-        <div class="field" id="geminiModelField" hidden>
-          <label class="label" for="geminiModelSelect">Model</label>
-          <select class="select" id="geminiModelSelect">
-            <optgroup label="Gemini 2.5">
-              <option value="gemini-2.5-flash">Gemini 2.5 Flash (recommended)</option>
-              <option value="gemini-2.5-pro">Gemini 2.5 Pro (most capable)</option>
-              <option value="gemini-2.5-flash-lite-preview-06-17">Gemini 2.5 Flash-Lite (fastest)</option>
-            </optgroup>
-            <optgroup label="Gemini 2.0">
-              <option value="gemini-2.0-flash" selected>Gemini 2.0 Flash (stable)</option>
-              <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash-Lite</option>
-            </optgroup>
-            <optgroup label="Gemini 1.5">
-              <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
-              <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
-              <option value="gemini-1.5-flash-8b">Gemini 1.5 Flash-8B (lightest)</option>
-            </optgroup>
-          </select>
-          <p class="hint">
-            Free tier has rate limits. If you see quota errors, switch to
-            <strong>Gemini 2.0 Flash</strong> or
-            <a id="checkModelsLink" href="#" target="_blank" rel="noopener">check your available models ↗</a>
-          </p>
-        </div>
-
-        <!-- Claude model selector -->
-        <div class="field" id="claudeModelField" hidden>
-          <label class="label" for="claudeModelSelect">Model</label>
-          <select class="select" id="claudeModelSelect">
-            <optgroup label="Claude 4">
-              <option value="claude-opus-4-6">Claude Opus 4 (most capable)</option>
-              <option value="claude-sonnet-4-6">Claude Sonnet 4 (balanced)</option>
-            </optgroup>
-            <optgroup label="Claude 3.7 / 3.5">
-              <option value="claude-3-7-sonnet-20250219">Claude 3.7 Sonnet</option>
-              <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
-              <option value="claude-3-5-haiku-20241022">Claude 3.5 Haiku (fast)</option>
-            </optgroup>
-            <optgroup label="Claude 3">
-              <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5 (fast &amp; cheap)</option>
-              <option value="claude-3-opus-20240229">Claude 3 Opus</option>
-              <option value="claude-3-haiku-20240307">Claude 3 Haiku</option>
-            </optgroup>
-          </select>
+        <h2 class="card-title">AI Mode</h2>
+        <p class="card-desc">Choose how PageMind connects to AI. Use <strong>Direct API</strong> if you have your own key, or <strong>Backend Server</strong> to route through a proxy.</p>
+        <div class="mode-toggle" id="modeToggle">
+          <button class="mode-btn active" data-mode="direct">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            Direct API
+          </button>
+          <button class="mode-btn" data-mode="backend">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            Backend Server
+          </button>
         </div>
       </section>
 
-      <!-- API Key -->
-      <section class="card">
-        <h2 class="card-title">API Key</h2>
-        <p class="card-desc">
-          Your key is stored locally in <code>chrome.storage.local</code> — it never leaves your device except for direct API calls.
-        </p>
+      <!-- Direct API panel -->
+      <div id="directPanel">
+        <section class="card">
+          <h2 class="card-title">AI Provider</h2>
+          <p class="card-desc">Your API key is stored locally and used directly — it never goes through any intermediate server.</p>
 
-        <div class="field">
-          <label class="label" for="apiKeyInput">
-            <span id="keyLabel">OpenAI API Key</span>
-          </label>
-          <div class="input-wrap">
-            <input
-              class="input"
-              type="password"
-              id="apiKeyInput"
-              placeholder="sk-…"
-              autocomplete="off"
-              spellcheck="false"
-            />
-            <button class="toggle-btn" id="toggleKey" aria-label="Toggle key visibility" title="Show/hide key">
-              <svg id="eyeIcon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-                <circle cx="12" cy="12" r="3"/>
-              </svg>
-            </button>
+          <div class="field">
+            <label class="label" for="providerSelect">Provider</label>
+            <select class="select" id="providerSelect">
+              <option value="openai">OpenAI (GPT)</option>
+              <option value="gemini">Google Gemini</option>
+              <option value="claude">Anthropic (Claude)</option>
+            </select>
           </div>
-          <p class="hint" id="keyHint">
-            Get your key at <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com/api-keys</a>
-          </p>
-        </div>
-      </section>
+
+          <!-- OpenAI model -->
+          <div class="field" id="modelField">
+            <label class="label" for="modelSelect">Model</label>
+            <select class="select" id="modelSelect">
+              <option value="gpt-4o-mini">GPT-4o mini (fast &amp; cheap)</option>
+              <option value="gpt-4o">GPT-4o (best quality)</option>
+              <option value="gpt-3.5-turbo">GPT-3.5 Turbo (legacy)</option>
+            </select>
+          </div>
+
+          <!-- Gemini model -->
+          <div class="field" id="geminiModelField" hidden>
+            <label class="label" for="geminiModelSelect">Model</label>
+            <select class="select" id="geminiModelSelect">
+              <optgroup label="Gemini 2.5">
+                <option value="gemini-2.5-flash">Gemini 2.5 Flash (recommended)</option>
+                <option value="gemini-2.5-pro">Gemini 2.5 Pro (most capable)</option>
+              </optgroup>
+              <optgroup label="Gemini 2.0">
+                <option value="gemini-2.0-flash" selected>Gemini 2.0 Flash (stable)</option>
+                <option value="gemini-2.0-flash-lite">Gemini 2.0 Flash-Lite</option>
+              </optgroup>
+              <optgroup label="Gemini 1.5">
+                <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+              </optgroup>
+            </select>
+          </div>
+
+          <!-- Claude model -->
+          <div class="field" id="claudeModelField" hidden>
+            <label class="label" for="claudeModelSelect">Model</label>
+            <select class="select" id="claudeModelSelect">
+              <optgroup label="Claude 4">
+                <option value="claude-opus-4-6">Claude Opus 4 (most capable)</option>
+                <option value="claude-sonnet-4-6">Claude Sonnet 4 (balanced)</option>
+              </optgroup>
+              <optgroup label="Claude 3.5">
+                <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
+                <option value="claude-3-5-haiku-20241022">Claude 3.5 Haiku (fast)</option>
+              </optgroup>
+              <optgroup label="Claude 3">
+                <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5 (fast &amp; cheap)</option>
+                <option value="claude-3-haiku-20240307">Claude 3 Haiku</option>
+              </optgroup>
+            </select>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title">API Key</h2>
+          <p class="card-desc">Stored in <code>chrome.storage.local</code> — never synced across devices or sent to third parties.</p>
+
+          <div class="field">
+            <label class="label" for="apiKeyInput"><span id="keyLabel">OpenAI API Key</span></label>
+            <div class="input-wrap">
+              <input class="input" type="password" id="apiKeyInput" placeholder="sk-…" autocomplete="off" spellcheck="false" />
+              <button class="toggle-btn" id="toggleKey" aria-label="Toggle key visibility">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+                </svg>
+              </button>
+            </div>
+            <p class="hint" id="keyHint">
+              Get your key at <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com/api-keys</a>
+            </p>
+          </div>
+        </section>
+      </div>
+
+      <!-- Backend panel -->
+      <div id="backendPanel" hidden>
+        <section class="card">
+          <h2 class="card-title">Backend Server</h2>
+          <p class="card-desc">Point PageMind at your own backend or the default Render deployment. The backend handles AI calls server-side — no key needed in the extension.</p>
+
+          <div class="field">
+            <label class="label" for="backendUrlInput">Backend URL</label>
+            <input class="input" type="url" id="backendUrlInput"
+              placeholder="https://pagemind-backend.onrender.com"
+              autocomplete="off" spellcheck="false" />
+            <p class="hint">Default: <code>https://pagemind-backend.onrender.com</code> (free tier, cold-starts in ~30s)</p>
+          </div>
+
+          <button class="btn btn--secondary btn--sm" id="pingBtn">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+            </svg>
+            Test Connection
+          </button>
+          <div class="ping-result" id="pingResult" hidden></div>
+        </section>
+      </div>
 
       <!-- Cache -->
       <section class="card">
@@ -148,7 +166,6 @@
         <button class="btn btn--danger" id="clearCacheBtn">Clear All Cached Summaries</button>
       </section>
 
-      <!-- Actions -->
       <div class="actions">
         <button class="btn btn--secondary" id="cancelBtn">Cancel</button>
         <button class="btn btn--primary" id="saveBtn">Save Settings</button>
