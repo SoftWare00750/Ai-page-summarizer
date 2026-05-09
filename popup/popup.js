@@ -259,6 +259,8 @@
     if (text) el.loadingText.textContent = text;
   }
 
+  function setLoadingText(text) { setLoading(true, text); }
+
   function showError(msg)  { el.errorAlert.hidden = false; el.errorMsg.textContent = msg; }
   function clearError()    { el.errorAlert.hidden = true;  el.errorMsg.textContent = ""; }
   function openSettings()  { chrome.runtime.openOptionsPage(); }
